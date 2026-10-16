@@ -1,5 +1,6 @@
 // Placeholder layer management — mixed into PixaromaEditor.prototype
 import { PixaromaEditor } from "./core.mjs";
+import { rescalePowerPin } from "./power_pin.mjs";
 
 import { pixApiUrl } from "../shared/api_url.mjs";
 // A LoadImage value can carry a subfolder or a type annotation: a raw value 404s
@@ -232,6 +233,9 @@ PixaromaEditor.prototype.previewPlaceholderInput = function (layerId) {
     layer.img = this._applyFillMode(img, phW, phH, layer.fillMode || "cover", (bitmapImg) => {
       layer.img = bitmapImg;
     });
+    // The fitted image may have grown (quality-fix upscale): keep the pins
+    // pointing at the same content. Same-size -> no-op.
+    rescalePowerPin(layer, origPhW, origPhH);
     this.ui.updateActiveLayerUI();
     this.draw();
     this.pushHistory();
@@ -305,10 +309,13 @@ PixaromaEditor.prototype.changePlaceholderRatio = function (layer, ratioKey) {
   layer.scaleX = 1;
   layer.scaleY = 1;
 
+  const oldW = layer.img ? layer.img.width : w;
+  const oldH = layer.img ? layer.img.height : h;
   layer.img = this._makePlaceholderImage(w, h, layer.placeholderColor, layer.name, (bitmapImg) => {
     layer.img = bitmapImg;
     this.draw();
   });
+  rescalePowerPin(layer, oldW, oldH);
   this.ui.updateActiveLayerUI();
   this.draw();
   this.pushHistory();

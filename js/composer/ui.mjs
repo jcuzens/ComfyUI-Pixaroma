@@ -174,7 +174,7 @@ export class PixaromaUI {
     // the Adjustments sliders + the Amount (layer-panel opacity), then bail.
     if (_isFx) {
       if (core.activeMode === "eraser" || core.activeMode === "crop") core.setMode(null);
-      for (const p of [core.eraserPanel, core.cropPanel]) {
+      for (const p of [core.eraserPanel, core.cropPanel, core.powerPinPanel]) {
         if (p) { p.style.opacity = "0.3"; p.style.pointerEvents = "none"; }
       }
       if (core.removeBgBtn) { core.removeBgBtn.style.opacity = "0.3"; core.removeBgBtn.style.pointerEvents = "none"; }
@@ -195,7 +195,7 @@ export class PixaromaUI {
       if (core.toolsPanel) { core.toolsPanel.style.opacity = "1"; core.toolsPanel.style.pointerEvents = "auto"; }
       if (core.btnDelLayer) core.btnDelLayer.style.opacity = "1";
       if (core.btnDupLayer) core.btnDupLayer.style.opacity = "1";
-      for (const p of [core.eraserPanel, core.cropPanel]) {
+      for (const p of [core.eraserPanel, core.cropPanel, core.powerPinPanel]) {
         if (p) { p.style.opacity = "0.3"; p.style.pointerEvents = "none"; }
       }
       if (core.removeBgBtn) { core.removeBgBtn.style.opacity = "0.3"; core.removeBgBtn.style.pointerEvents = "none"; }
@@ -246,6 +246,18 @@ export class PixaromaUI {
         core.cropPanel.style.pointerEvents = "none";
       }
       if (core.activeMode === "crop") core.setMode(null);
+      if (core.powerPinPanel) {
+        core.powerPinPanel.style.opacity = "0.3";
+        core.powerPinPanel.style.pointerEvents = "none";
+      }
+      if (core.btnPowerPinToggle) {
+        core.btnPowerPinToggle.classList.remove("pxf-btn-accent");
+        core.btnPowerPinToggle.innerText = "Enable  [P]";
+      }
+      if (core.btnResetPowerPin) {
+        core.btnResetPowerPin.style.opacity = "0.3";
+        core.btnResetPowerPin.disabled = true;
+      }
     } else {
       core.toolsPanel.style.opacity = "1";
       core.toolsPanel.style.pointerEvents = "auto";
@@ -288,6 +300,47 @@ export class PixaromaUI {
           const hasCrop = !!(cropLayer && cropLayer.cropRect);
           core.btnResetCrop.style.opacity = hasCrop ? "1" : "0.3";
           core.btnResetCrop.disabled = !hasCrop;
+        }
+      }
+
+      // Power Pin: one image/placeholder layer (no text/FX); sync the panel.
+      {
+        const ppLayer = core.getActiveLayer();
+        const ppOk =
+          core.selectedLayerIds.size === 1 &&
+          ppLayer &&
+          ppLayer.img &&
+          !ppLayer.isText &&
+          !ppLayer.isAdjustment;
+        if (core.powerPinPanel) {
+          core.powerPinPanel.style.opacity = ppOk ? "1" : "0.3";
+          core.powerPinPanel.style.pointerEvents = ppOk ? "auto" : "none";
+        }
+        if (core.btnPowerPinToggle) {
+          const on = !!(ppLayer && ppLayer.powerPin);
+          core.btnPowerPinToggle.classList.toggle("pxf-btn-accent", on);
+          core.btnPowerPinToggle.innerText = on ? "Disable  [P]" : "Enable  [P]";
+        }
+        if (ppLayer && ppLayer.powerPin) {
+          const pp = ppLayer.powerPin;
+          for (const key of [
+            "perspective",
+            "expandTop",
+            "expandLeft",
+            "expandRight",
+            "expandBottom",
+          ]) {
+            const row = core.ppSliderRefs && core.ppSliderRefs[key];
+            if (row) row.setValue(pp[key] ?? (key === "perspective" ? 100 : 0));
+          }
+          if (core.ppUnstretchChk) core.ppUnstretchChk.checked = !!pp.unstretch;
+          if (core.btnResetPowerPin) {
+            core.btnResetPowerPin.style.opacity = "1";
+            core.btnResetPowerPin.disabled = false;
+          }
+        } else if (core.btnResetPowerPin) {
+          core.btnResetPowerPin.style.opacity = "0.3";
+          core.btnResetPowerPin.disabled = true;
         }
       }
 
@@ -1518,6 +1571,100 @@ export class PixaromaUI {
     cropPanel.content.appendChild(core.btnResetCrop);
 
     layout.rightSidebar.insertBefore(core.cropPanel, layout.sidebarFooter);
+
+    // --- 2c. Power Pin Panel ---
+    const powerPinPanel = createPanel("Power Pin", {
+      collapsible: true,
+      collapsed: true,
+    });
+    core.powerPinPanel = powerPinPanel.el;
+    core.powerPinPanel.style.opacity = "0.3";
+    core.powerPinPanel.style.pointerEvents = "none";
+
+    core.btnPowerPinToggle = createButton("Enable  [P]", {
+      variant: "standard",
+      title:
+        "Corner-pin warp (CC Power Pin) - drag the layer's corner handles",
+      onClick: () => core._togglePowerPin(),
+    });
+    core.btnPowerPinToggle.style.width = "100%";
+    core.btnPowerPinToggle.style.marginBottom = "8px";
+    powerPinPanel.content.appendChild(core.btnPowerPinToggle);
+
+    core.btnResetPowerPin = createButton("Reset pins", {
+      variant: "full",
+      title: "Restore identity pins + default settings",
+      onClick: () => {
+        const layer = core.getActiveLayer();
+        if (!layer || !layer.powerPin || !layer.img) return;
+        const W = layer.img.width, H = layer.img.height;
+        layer.powerPin.pins = [[0, 0], [W, 0], [W, H], [0, H]];
+        layer.powerPin.perspective = 100;
+        layer.powerPin.expandTop = 0;
+        layer.powerPin.expandLeft = 0;
+        layer.powerPin.expandRight = 0;
+        layer.powerPin.expandBottom = 0;
+        layer.powerPin.unstretch = false;
+        this.updateActiveLayerUI();
+        core.draw();
+        core.pushHistory();
+      },
+    });
+    core.btnResetPowerPin.style.width = "100%";
+    core.btnResetPowerPin.style.opacity = "0.3";
+    core.btnResetPowerPin.disabled = true;
+    powerPinPanel.content.appendChild(core.btnResetPowerPin);
+
+    const ppSet = (key) => (v) => {
+      const layer = core.getActiveLayer();
+      if (!layer || !layer.powerPin) return;
+      layer.powerPin[key] = v;
+      core.draw();
+    };
+    const ppRows = [
+      ["Perspective", 0, 100, "perspective"],
+      ["Expand T", -100, 1000, "expandTop"],
+      ["Expand L", -100, 1000, "expandLeft"],
+      ["Expand R", -100, 1000, "expandRight"],
+      ["Expand B", -100, 1000, "expandBottom"],
+    ];
+    const ppSliderRefs = {};
+    for (const [label, min, max, key] of ppRows) {
+      const row = createSliderRow(label, min, max, 0, ppSet(key), {
+        labelWidth: "72px",
+      });
+      const commit = () => {
+        const layer = core.getActiveLayer();
+        if (layer && layer.powerPin) core.pushHistory();
+      };
+      row.slider.addEventListener("change", commit);
+      row.numInput.addEventListener("change", commit);
+      powerPinPanel.content.appendChild(row.el);
+      ppSliderRefs[key] = row;
+    }
+    core.ppSliderRefs = ppSliderRefs;
+
+    const unstretchRow = document.createElement("div");
+    unstretchRow.className = "pxf-slider-row";
+    const unstretchLbl = document.createElement("label");
+    unstretchLbl.className = "pxf-slider-label";
+    unstretchLbl.textContent = "Unstretch";
+    unstretchLbl.style.width = "72px";
+    unstretchRow.appendChild(unstretchLbl);
+    const unstretchChk = document.createElement("input");
+    unstretchChk.type = "checkbox";
+    unstretchChk.addEventListener("change", () => {
+      const layer = core.getActiveLayer();
+      if (!layer || !layer.powerPin) return;
+      layer.powerPin.unstretch = unstretchChk.checked;
+      core.draw();
+      core.pushHistory();
+    });
+    unstretchRow.appendChild(unstretchChk);
+    powerPinPanel.content.appendChild(unstretchRow);
+    core.ppUnstretchChk = unstretchChk;
+
+    layout.rightSidebar.insertBefore(core.powerPinPanel, layout.sidebarFooter);
 
     // --- 3. Background Removal panel ---
     const bgRemovalPanel = createPanel("AI Background Removal", {

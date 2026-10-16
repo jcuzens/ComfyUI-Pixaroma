@@ -2,6 +2,7 @@
 import { PixaromaEditor } from "./core.mjs";
 import { PixaromaLayers } from "./layers.mjs";
 import { PixaromaAPI } from "./api.mjs";
+import { powerPinSetup } from "./power_pin.mjs";
 
 PixaromaEditor.prototype.attachEvents = function () {
   const getBounds = (layer) => {
@@ -222,6 +223,10 @@ PixaromaEditor.prototype.attachEvents = function () {
           );
       }
     }
+    if (e.code === "KeyP" && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      this._togglePowerPin();
+    }
     if (e.code === "KeyV" && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       this.setMode(null);
@@ -330,6 +335,18 @@ PixaromaEditor.prototype.attachEvents = function () {
       const layer = this.getActiveLayer();
       if (layer && !layer.locked && layer.img) {
         const pts = PixaromaLayers.getTransformedPoints(layer);
+        const ppSetup = layer.powerPin
+          ? powerPinSetup(layer.powerPin, layer.img.width, layer.img.height)
+          : null;
+        if (ppSetup) {
+          for (let i = 0; i < 4; i++)
+            if (Math.hypot(coords.x - pts[i].x, coords.y - pts[i].y) <= 15) {
+              this.selHitArea.style.cursor = "move";
+              return;
+            }
+          this.selHitArea.style.cursor = "default";
+          return;
+        }
         if (Math.hypot(coords.x - pts[8].x, coords.y - pts[8].y) <= 15) {
           this.selHitArea.style.cursor = "crosshair";
           return;
@@ -388,15 +405,22 @@ PixaromaEditor.prototype.attachEvents = function () {
         const layer = this.getActiveLayer();
         if (layer && !layer.locked && layer.img) {
           const pts = PixaromaLayers.getTransformedPoints(layer);
+          const ppSetup = layer.powerPin
+            ? powerPinSetup(layer.powerPin, layer.img.width, layer.img.height)
+            : null;
           let hitHandle = false;
-          if (Math.hypot(coords.x - pts[8].x, coords.y - pts[8].y) <= 15)
-            hitHandle = true;
           for (let i = 0; i < 4; i++)
             if (Math.hypot(coords.x - pts[i].x, coords.y - pts[i].y) <= 15)
               hitHandle = true;
-          for (let i = 4; i < 8; i++)
-            if (Math.hypot(coords.x - pts[i].x, coords.y - pts[i].y) <= 12)
+          if (!ppSetup) {
+            if (Math.hypot(coords.x - pts[8].x, coords.y - pts[8].y) <= 15)
               hitHandle = true;
+            for (let i = 4; i < 8; i++)
+              if (
+                Math.hypot(coords.x - pts[i].x, coords.y - pts[i].y) <= 12
+              )
+                hitHandle = true;
+          }
           if (hitHandle) {
             e.preventDefault();
             e.stopPropagation();
@@ -642,6 +666,11 @@ PixaromaEditor.prototype.attachEvents = function () {
         const dup = { ...layer, id: Date.now().toString() + Math.random(), cx: layer.cx + 20, cy: layer.cy + 20 };
         // Deep-copy cropRect so re-cropping one copy can't alias the other.
         if (layer.cropRect) dup.cropRect = { ...layer.cropRect };
+        if (layer.powerPin)
+          dup.powerPin = {
+            ...layer.powerPin,
+            pins: layer.powerPin.pins.map((pt) => [...pt]),
+          };
         // Deep-copy FX adjustments + text state so editing one copy doesn't
         // alias the other (they're objects; {...layer} shares them by reference).
         if (layer.adjustments) dup.adjustments = { ...layer.adjustments };
@@ -887,6 +916,14 @@ PixaromaEditor.prototype.attachEvents = function () {
         // source (rawServerPath is never overwritten by cropping), so the crop
         // stays re-editable after reload.
         if (layer.cropRect) layerEntry.cropRect = layer.cropRect;
+        // powerPin pins are post-crop image pixels; cropRect is source pixels.
+        // They stay independent - a re-crop after reload remaps the pins via
+        // _cropMaskOrigin (finishRestore -> applyCropToLayer, Task 10).
+        if (layer.powerPin)
+          layerEntry.powerPin = {
+            ...layer.powerPin,
+            pins: layer.powerPin.pins.map((pt) => [...pt]),
+          };
         if (layer.isPlaceholder) {
           layerEntry.isPlaceholder = true;
           layerEntry.placeholderColor = layer.placeholderColor;
@@ -938,7 +975,7 @@ PixaromaEditor.prototype.attachEvents = function () {
         bg_color: this._bgColor || "#1e1e1e",
         layers: layerMeta,
         composite_path: null,
-        session_ver: 6.0,
+        session_ver: 6.1,
       };
       const dFin = await PixaromaAPI.saveProject(this.projectID, finalDataURL);
 
@@ -1049,6 +1086,7 @@ PixaromaEditor.prototype.attachEvents = function () {
       if (this.isMouseDown && e.buttons !== 1) {
         this.isMouseDown = false;
         this.interactionMode = null;
+        this._pinIdx = null;
         this.canvas.style.cursor = "default";
         this.verifySelection();
         this.ui.updateActiveLayerUI();
@@ -1136,6 +1174,7 @@ PixaromaEditor.prototype.attachEvents = function () {
     if (this.isMouseDown) {
       this.isMouseDown = false;
       this.interactionMode = null;
+      this._pinIdx = null;
       this.canvas.style.cursor = "default";
       this.verifySelection();
       // Text layer resized via handles: fold scale into font size + re-render
@@ -1164,6 +1203,7 @@ PixaromaEditor.prototype.attachEvents = function () {
       const wasTransforming = !!this.interactionMode;
       this.isMouseDown = false;
       this.interactionMode = null;
+      this._pinIdx = null;
       if (this.canvas) this.canvas.style.cursor =
         wasErasing || wasCropping ? "crosshair" : "default";
       // Commit the in-progress action so focus loss mid-gesture (e.g. alt-tab)
@@ -1201,12 +1241,69 @@ PixaromaEditor.prototype._commitTextScaleFold = function () {
   return true;
 };
 
+// Toggle CC Power Pin on the active layer (image + placeholder only).
+// Enable: identity pins (no jump - the frame keeps its exact placement).
+// Disable: drop the pins, the layer renders unpinned.
+PixaromaEditor.prototype._togglePowerPin = function () {
+  if (this.selectedLayerIds.size !== 1) {
+    if (this._layout)
+      this._layout.setStatus(
+        "Power Pin requires a single layer selected",
+        "warn",
+      );
+    return;
+  }
+  const layer = this.getActiveLayer();
+  if (!layer || !layer.img || layer.isText || layer.isAdjustment) {
+    if (this._layout)
+      this._layout.setStatus("Power Pin doesn't apply to this layer", "warn");
+    return;
+  }
+  if (layer.powerPin) {
+    layer.powerPin = null;
+    if (this._layout) this._layout.setStatus("Power Pin removed");
+  } else {
+    const W = layer.img.width, H = layer.img.height;
+    layer.powerPin = {
+      pins: [[0, 0], [W, 0], [W, H], [0, H]],
+      perspective: 100,
+      expandTop: 0,
+      expandLeft: 0,
+      expandRight: 0,
+      expandBottom: 0,
+      unstretch: false,
+    };
+    if (this._layout)
+      this._layout.setStatus(
+        "Power Pin on - drag the corner handles, [P] removes",
+      );
+  }
+  this.ui.updateActiveLayerUI();
+  this.draw();
+  this.pushHistory();
+};
+
 PixaromaEditor.prototype.onSelectMouseDown = function (e, coords) {
   if (this.selectedLayerIds.size === 1) {
     const layer = this.getActiveLayer();
     if (layer && !layer.locked && layer.img) {
       const pts = PixaromaLayers.getTransformedPoints(layer);
-      if (Math.hypot(coords.x - pts[8].x, coords.y - pts[8].y) <= 15)
+      const ppSetup = layer.powerPin
+        ? powerPinSetup(layer.powerPin, layer.img.width, layer.img.height)
+        : null;
+      if (ppSetup) {
+        // Pinned layer: the corner handles ARE the pins. Dragging one warps;
+        // edge/rotation handles are off for pinned layers.
+        for (let i = 0; i < 4; i++)
+          if (Math.hypot(coords.x - pts[i].x, coords.y - pts[i].y) <= 15) {
+            this.interactionMode = "pin";
+            this._pinIdx = i;
+            this.canvas.style.cursor = "move";
+            return;
+          }
+      } else if (
+        Math.hypot(coords.x - pts[8].x, coords.y - pts[8].y) <= 15
+      )
         this.interactionMode = "rotate";
       else if (Math.hypot(coords.x - pts[4].x, coords.y - pts[4].y) <= 12)
         this.interactionMode = "stretchL";
@@ -1273,6 +1370,11 @@ PixaromaEditor.prototype.onSelectMouseDown = function (e, coords) {
         if (this.selectedLayerIds.has(layer.id)) {
           const dup = { ...layer, id: Date.now().toString() + Math.random(), cx: layer.cx + 20, cy: layer.cy + 20 };
           if (layer.cropRect) dup.cropRect = { ...layer.cropRect };
+          if (layer.powerPin)
+            dup.powerPin = {
+              ...layer.powerPin,
+              pins: layer.powerPin.pins.map((pt) => [...pt]),
+            };
           if (layer.adjustments) dup.adjustments = { ...layer.adjustments };
           if (layer.textState) dup.textState = { ...layer.textState };
           // Deep-copy eraser mask so edits don't affect the original
@@ -1331,6 +1433,18 @@ PixaromaEditor.prototype.onSelectMouseMove = function (e, coords) {
       const layer = this.getActiveLayer();
       if (layer && !layer.locked && layer.img) {
         const pts = PixaromaLayers.getTransformedPoints(layer);
+        const ppSetup = layer.powerPin
+          ? powerPinSetup(layer.powerPin, layer.img.width, layer.img.height)
+          : null;
+        if (ppSetup) {
+          for (let i = 0; i < 4; i++)
+            if (Math.hypot(coords.x - pts[i].x, coords.y - pts[i].y) <= 15) {
+              this.canvas.style.cursor = "move";
+              return;
+            }
+          this.canvas.style.cursor = "default";
+          return;
+        }
         if (Math.hypot(coords.x - pts[8].x, coords.y - pts[8].y) <= 15) {
           this.canvas.style.cursor = "crosshair";
           return;
@@ -1366,6 +1480,16 @@ PixaromaEditor.prototype.onSelectMouseMove = function (e, coords) {
 
   const dx = coords.x - this.startX;
   const dy = coords.y - this.startY;
+
+  if (this.interactionMode === "pin") {
+    const layer = this.getActiveLayer();
+    if (layer && layer.powerPin && this._pinIdx != null) {
+      const p = this.getCoordinatesInLayerImage(layer, coords.x, coords.y);
+      layer.powerPin.pins[this._pinIdx] = [p.lx, p.ly];
+    }
+    this.draw();
+    return;
+  }
 
   this.tempTransList.forEach((t) => {
     const layer = this.layers.find((l) => l.id === t.id);

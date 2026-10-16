@@ -4,6 +4,7 @@ from PIL import Image, ImageChops, ImageFilter
 import os
 import json
 import time
+import math
 import folder_paths
 from server import PromptServer
 from .node_ref import any_type, FlexibleOptionalInputType
@@ -303,6 +304,217 @@ def _blend_over(base_rgba, top_rgba, mode):
     return Image.fromarray(out, "RGBA")
 
 
+def _power_pin_homography(q0, q1, q2, q3):
+    """Homography unit square -> quad (q0=TL, q1=TR, q2=BR, q3=BL): 8 values
+    [h00 h01 h02 h10 h11 h12 h20 h21] with h22 = 1. None when degenerate.
+    Mirrors power_pin.mjs buildHomography (cross-language parity)."""
+    A = np.zeros((8, 8), dtype=np.float64)
+    b = np.zeros(8, dtype=np.float64)
+    pts = ((q0, 0.0, 0.0), (q1, 1.0, 0.0), (q2, 1.0, 1.0), (q3, 0.0, 1.0))
+    for i, (q, sx, sy) in enumerate(pts):
+        A[2 * i, 0] = sx
+        A[2 * i, 1] = sy
+        A[2 * i, 2] = 1.0
+        A[2 * i, 6] = -q[0] * sx
+        A[2 * i, 7] = -q[0] * sy
+        A[2 * i + 1, 3] = sx
+        A[2 * i + 1, 4] = sy
+        A[2 * i + 1, 5] = 1.0
+        A[2 * i + 1, 6] = -q[1] * sx
+        A[2 * i + 1, 7] = -q[1] * sy
+        b[2 * i] = q[0]
+        b[2 * i + 1] = q[1]
+    try:
+        h = np.linalg.solve(A, b)
+    except np.linalg.LinAlgError:
+        return None
+    if not np.all(np.isfinite(h)):
+        return None
+    a, bb, c, d, e, f, g, hh = h
+    det = a * (e - f * hh) - bb * (d - f * g) + c * (d * hh - e * g)
+    if not np.isfinite(det) or abs(det) < 1e-9:
+        return None
+    return h
+
+
+def _power_pin_homography_inverse(h):
+    """Analytic inverse of an 8-value homography (h22 = 1), re-normalized to
+    h22 = 1. adj(H) with the 3x3 (h22=1) convention. None when singular."""
+    a, bb, c, d, e, f, g, hh = h
+    det = a * (e - f * hh) - bb * (d - f * g) + c * (d * hh - e * g)
+    if not np.isfinite(det) or abs(det) < 1e-9:
+        return None
+    n22 = a * e - bb * d
+    if abs(n22) < 1e-12:
+        return None
+    inv = 1.0 / n22
+    return np.array([
+        (e - f * hh) * inv, (c * hh - bb) * inv, (bb * f - c * e) * inv,
+        (f * g - d) * inv, (a - c * g) * inv, (c * d - a * f) * inv,
+        (d * hh - e * g) * inv, (bb * g - a * hh) * inv,
+    ])
+
+
+def _power_pin_coons(q, u, v):
+    """Vectorized Coons (bilinear) quad map: (u, v) arrays -> (..., 2)."""
+    q0x, q0y = q[0]
+    q1x, q1y = q[1]
+    q2x, q2y = q[2]
+    q3x, q3y = q[3]
+    tx = q0x + (q1x - q0x) * u
+    bx = q3x + (q2x - q3x) * u
+    ty = q0y + (q1y - q0y) * u
+    by = q3y + (q2y - q3y) * u
+    return np.stack((tx + (bx - tx) * v, ty + (by - ty) * v), axis=-1)
+
+
+def _power_pin_newton_inverse(q, px, py, u0, v0):
+    """Vectorized Newton iteration for the bilinear-quad inverse (spec 3.4).
+    Starts from the projective preimage; 8 iterations, per-pixel freeze on
+    convergence (mirrors the JS break)."""
+    e = 1e-4
+    bu = u0.copy()
+    bv = v0.copy()
+    for _ in range(8):
+        f = _power_pin_coons(q, bu, bv)
+        rx = f[..., 0] - px
+        ry = f[..., 1] - py
+        fa = _power_pin_coons(q, bu + e, bv)
+        fc = _power_pin_coons(q, bu, bv + e)
+        j00 = (fa[..., 0] - f[..., 0]) / e
+        j10 = (fa[..., 1] - f[..., 1]) / e
+        j01 = (fc[..., 0] - f[..., 0]) / e
+        j11 = (fc[..., 1] - f[..., 1]) / e
+        det = j00 * j11 - j01 * j10
+        with np.errstate(divide="ignore", invalid="ignore"):
+            du = (j11 * rx - j01 * ry) / det
+            dv = (-j10 * rx + j00 * ry) / det
+        adv = (np.abs(rx) + np.abs(ry) >= 1e-6) & (np.abs(det) > 1e-12)
+        bu = np.where(adv, bu - du, bu)
+        bv = np.where(adv, bv - dv, bv)
+    return bu, bv
+
+
+def _power_pin_setup(pp, W, H):
+    """Resolve a layer's powerPin into a warp setup (spec 3). None when
+    absent or degenerate (collinear pins, zero-size expanded rect, NaN)."""
+    if not isinstance(pp, dict):
+        return None
+    pins = pp.get("pins")
+    if not isinstance(pins, (list, tuple)) or len(pins) != 4:
+        return None
+    try:
+        q = [[float(pt[0]), float(pt[1])] for pt in pins]
+        p = min(1.0, max(0.0, float(pp.get("perspective", 100)) / 100.0))
+        eT = float(pp.get("expandTop", 0)) / 100.0
+        eL = float(pp.get("expandLeft", 0)) / 100.0
+        eR = float(pp.get("expandRight", 0)) / 100.0
+        eB = float(pp.get("expandBottom", 0)) / 100.0
+    except (TypeError, ValueError, IndexError):
+        return None
+    if any(not (math.isfinite(px) and math.isfinite(py)) for px, py in q):
+        return None
+    unstretch = bool(pp.get("unstretch", False))
+    x0, y0 = -eL * W, -eT * H
+    x1, y1 = W * (1.0 + eR), H * (1.0 + eB)
+    if x1 - x0 <= 0 or y1 - y0 <= 0:
+        return None
+    h = _power_pin_homography(q[0], q[1], q[2], q[3])
+    if h is None:
+        return None
+    ox, oy, ow, oh = 0, 0, W, H
+    inv = None
+    if not unstretch:
+        xs = [pt[0] for pt in q]
+        ys = [pt[1] for pt in q]
+        ox = int(math.floor(min(xs)))
+        oy = int(math.floor(min(ys)))
+        ow = max(1, int(math.ceil(max(xs))) - ox)
+        oh = max(1, int(math.ceil(max(ys))) - oy)
+        inv = _power_pin_homography_inverse(h)
+        if inv is None:
+            return None
+    return {"q": q, "p": p, "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "unstretch": unstretch, "ox": ox, "oy": oy, "ow": ow, "oh": oh,
+            "h": h, "inv": inv, "W": W, "H": H}
+
+
+def _apply_power_pin(img, pp):
+    """CC Power Pin warp (spec 3). img = post-crop, post-mask PIL RGBA.
+    Returns (warped_RGBA, ox, oy, ow, oh) or None when pp is absent / the quad
+    is degenerate (caller renders the layer unpinned). Vectorized, row-tiled
+    (inverse-map + gather needs no halo; tiles bound peak memory only)."""
+    setup = _power_pin_setup(pp, img.width, img.height) if isinstance(pp, dict) else None
+    if setup is None:
+        return None
+    W, H = img.width, img.height
+    q, p = setup["q"], setup["p"]
+    x0, y0, x1, y1 = setup["x0"], setup["y0"], setup["x1"], setup["y1"]
+    unstretch, ox, oy, ow, oh = setup["unstretch"], setup["ox"], setup["oy"], setup["ow"], setup["oh"]
+    src = np.asarray(img.convert("RGBA"), dtype=np.float32)  # (H, W, 4)
+    out = np.zeros((oh, ow, 4), dtype=np.float32)
+    xs = (np.arange(ow) + 0.5) + ox
+    TILE = 256
+    for ty0 in range(0, oh, TILE):
+        ty1 = min(oh, ty0 + TILE)
+        PX, PY = np.meshgrid(xs, (np.arange(ty0, ty1) + 0.5) + oy)
+        if not unstretch:
+            h = setup["inv"]
+            w = h[6] * PX + h[7] * PY + 1.0
+            valid = np.abs(w) > 1e-12
+            with np.errstate(divide="ignore", invalid="ignore"):
+                u = (h[0] * PX + h[1] * PY + h[2]) / w
+                v = (h[3] * PX + h[4] * PY + h[5]) / w
+            u = np.where(valid, u, 2.0)
+            v = np.where(valid, v, 2.0)
+            if p < 1.0:
+                bu, bv = _power_pin_newton_inverse(q, PX, PY, u, v)
+                u = bu + (u - bu) * p
+                v = bv + (v - bv) * p
+            inside = valid & (u >= -1e-9) & (u <= 1.0 + 1e-9) & (v >= -1e-9) & (v <= 1.0 + 1e-9)
+            u = np.clip(np.where(inside, u, 0.0), 0.0, 1.0)
+            v = np.clip(np.where(inside, v, 0.0), 0.0, 1.0)
+            LX = x0 + u * (x1 - x0)
+            LY = y0 + v * (y1 - y0)
+        else:
+            u = (PX - x0) / (x1 - x0)
+            v = (PY - y0) / (y1 - y0)
+            inside = (u >= -1e-9) & (u <= 1.0 + 1e-9) & (v >= -1e-9) & (v <= 1.0 + 1e-9)
+            u = np.clip(np.where(inside, u, 0.0), 0.0, 1.0)
+            v = np.clip(np.where(inside, v, 0.0), 0.0, 1.0)
+            b = _power_pin_coons(q, u, v)
+            h = setup["h"]
+            w = h[6] * u + h[7] * v + 1.0
+            with np.errstate(divide="ignore", invalid="ignore"):
+                mx = (h[0] * u + h[1] * v + h[2]) / w
+                my = (h[3] * u + h[4] * v + h[5]) / w
+            okp = np.abs(w) > 1e-12
+            LX = b[..., 0] + np.where(okp, (mx - b[..., 0]) * p, 0.0)
+            LY = b[..., 1] + np.where(okp, (my - b[..., 1]) * p, 0.0)
+            inside &= okp
+        I0 = np.floor(LX - 0.5).astype(np.int32)
+        J0 = np.floor(LY - 0.5).astype(np.int32)
+        FX = np.clip(LX - (I0 + 0.5), 0.0, 1.0)
+        FY = np.clip(LY - (J0 + 0.5), 0.0, 1.0)
+        # Transparent padding (mirrors the JS neighbor guards): a neighbor
+        # outside the source contributes 0, so exact pixel centers (identity)
+        # sample pixel-exact and the source edge fades over the half pixel.
+        good = inside & (I0 >= -1) & (J0 >= -1) & (I0 < W) & (J0 < H)
+        I0g = np.clip(I0, 0, W - 1).astype(np.intp)
+        J0g = np.clip(J0, 0, H - 1).astype(np.intp)
+        I1g = np.clip(I0 + 1, 0, W - 1).astype(np.intp)
+        J1g = np.clip(J0 + 1, 0, H - 1).astype(np.intp)
+        c00 = np.where(((I0 >= 0) & (J0 >= 0) & good)[..., None], src[J0g, I0g], 0.0)
+        c10 = np.where(((I0 < W - 1) & (J0 >= 0) & good)[..., None], src[J0g, I1g], 0.0)
+        c01 = np.where(((I0 >= 0) & (J0 < H - 1) & good)[..., None], src[J1g, I0g], 0.0)
+        c11 = np.where(((I0 < W - 1) & (J0 < H - 1) & good)[..., None], src[J1g, I1g], 0.0)
+        FXe = FX[..., None]
+        FYe = FY[..., None]
+        samp = (c00 * (1.0 - FXe) + c10 * FXe) * (1.0 - FYe) + (c01 * (1.0 - FXe) + c11 * FXe) * FYe
+        out[ty0:ty1] = np.where(good[..., None], samp, 0.0)
+    return Image.fromarray(np.rint(out).astype(np.uint8), "RGBA"), ox, oy, ow, oh
+
+
 def _apply_layer_transform(img, layer, doc_w, doc_h):
     """Apply layer transforms and return a doc-sized RGBA canvas."""
     nat_w, nat_h = img.size
@@ -335,7 +547,23 @@ def _apply_layer_transform(img, layer, doc_w, doc_h):
     canvas = Image.new("RGBA", (doc_w, doc_h), (0, 0, 0, 0))
     canvas.paste(img, (paste_x, paste_y), img)
     return canvas
-
+def _power_pin_center(layer, W, H, ox, oy, ow, oh):
+    """Doc-space placement center for a warped layer (spec 3.8): C' = C + A(d),
+    d = (ox - W/2 + ow/2, oy - H/2 + oh/2); A = the same scale-flip-rotate
+    affine _apply_layer_transform applies (its PIL rotate(-rotation) equals
+    the canvas rotate(rotation) screen math). Identity pin -> (cx, cy) exact."""
+    dx = ox - W / 2.0 + ow / 2.0
+    dy = oy - H / 2.0 + oh / 2.0
+    x = dx * abs(float(layer.get("scaleX", 1.0) or 1.0))
+    y = dy * abs(float(layer.get("scaleY", 1.0) or 1.0))
+    if layer.get("flippedX"):
+        x = -x
+    if layer.get("flippedY"):
+        y = -y
+    rad = math.radians(float(layer.get("rotation", 0) or 0))
+    cx = float(layer.get("cx", 0.0) or 0.0)
+    cy = float(layer.get("cy", 0.0) or 0.0)
+    return cx + x * math.cos(rad) - y * math.sin(rad), cy + x * math.sin(rad) + y * math.cos(rad)
 
 class PixaromaImageComposition:
     DESCRIPTION = (
@@ -348,7 +576,7 @@ class PixaromaImageComposition:
         "rotate them with handles, and apply per-layer effects: opacity, blend "
         "modes (Normal, Multiply, Screen, Overlay, Darken, Lighten, Color "
         "Dodge, Color Burn, Hard Light, Soft Light, Difference, Exclusion, "
-        "Hue, Saturation, Color, Luminosity), Gaussian blur, and AI background "
+        "Hue, Saturation, Color, Luminosity), Gaussian blur, CC Power Pin (4-corner warp with perspective / expand / unstretch, [P]), and AI background "
         "removal (rembg-powered, picks the best installed model: birefnet -> "
         "isnet -> u2net auto-fallback).\n\n"
         "Eraser tool lets you mask any layer non-destructively. Per-layer blur "
@@ -529,6 +757,20 @@ class PixaromaImageComposition:
                     # failures). Isolate them so one malformed layer is skipped
                     # instead of failing the whole composite.
                     try:
+                        # CC Power Pin warp (post-crop, post-mask image
+                        # pixels). Placement is re-anchored to C' so enabling
+                        # or dragging pins never jumps the layer. Degenerate
+                        # quad -> layer renders unpinned (one notice).
+                        pp = layer.get("powerPin")
+                        if pp:
+                            nat_w, nat_h = layer_img.size
+                            res = _apply_power_pin(layer_img, pp)
+                            if res is None:
+                                print("[Pixaroma] Composer: degenerate power-pin quad, layer rendered unpinned")
+                            else:
+                                layer_img, pox, poy, pow_, poh = res
+                                cx2, cy2 = _power_pin_center(layer, nat_w, nat_h, pox, poy, pow_, poh)
+                                layer = {**layer, "cx": cx2, "cy": cy2}
                         composed = _apply_layer_transform(layer_img, layer, doc_w, doc_h)
                         # Quadratic curve: slider 0-100 maps to actual blur 0-50px
                         # (finer control at low end). Mirrored in

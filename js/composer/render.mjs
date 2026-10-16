@@ -2,6 +2,12 @@
 import { PixaromaEditor } from "./core.mjs";
 import { pixApiUrl } from "../shared/api_url.mjs";
 import { applyFx, isNeutral, fxSeed } from "./fx_engine.mjs";
+import {
+  powerPinSetup,
+  pinnedPointsToDoc,
+  powerPinAnchorShift,
+  warpPowerPinCanvas,
+} from "./power_pin.mjs";
 
 // Clone a layer for history restore. Shallow-copy the layer, but DEEP-copy the
 // mutable sub-objects the panels edit IN PLACE (adjustments / textState /
@@ -12,6 +18,8 @@ function cloneLayerForHistory(l) {
   if (l.adjustments) c.adjustments = { ...l.adjustments };
   if (l.textState) c.textState = { ...l.textState };
   if (l.cropRect) c.cropRect = { ...l.cropRect };
+  if (l.powerPin)
+    c.powerPin = { ...l.powerPin, pins: l.powerPin.pins.map((pt) => [...pt]) };
   // Deep-copy the eraser mask canvas too: a shallow {...l} shares the canvas
   // with the history snapshot, so strokes drawn after an undo/redo would bleed
   // into the stored snapshot and corrupt history.
@@ -138,21 +146,35 @@ PixaromaEditor.prototype._ensureSelPad = function () {
   for (const layer of this.layers) {
     if (!layer.visible || !this.selectedLayerIds.has(layer.id)) continue;
     if (!layer.img) continue;
-    const w = layer.img.width * Math.abs(layer.scaleX || 1);
-    const h = layer.img.height * Math.abs(layer.scaleY || 1);
-    const r = ((layer.rotation || 0) * Math.PI) / 180;
-    const cos = Math.abs(Math.cos(r));
-    const sin = Math.abs(Math.sin(r));
-    const aabbW = w * cos + h * sin;
-    const aabbH = w * sin + h * cos;
-    const cx = layer.cx ?? this.docWidth / 2;
-    const cy = layer.cy ?? this.docHeight / 2;
+    const W = layer.img.width, H = layer.img.height;
+    let minX, maxX, minY, maxY;
+    if (layer.powerPin && powerPinSetup(layer.powerPin, W, H)) {
+      const pts = pinnedPointsToDoc(layer, W, H);
+      minX = Math.min(...pts.map((p) => p.x));
+      maxX = Math.max(...pts.map((p) => p.x));
+      minY = Math.min(...pts.map((p) => p.y));
+      maxY = Math.max(...pts.map((p) => p.y));
+    } else {
+      const w = W * Math.abs(layer.scaleX || 1);
+      const h = H * Math.abs(layer.scaleY || 1);
+      const r = ((layer.rotation || 0) * Math.PI) / 180;
+      const cos = Math.abs(Math.cos(r));
+      const sin = Math.abs(Math.sin(r));
+      const aabbW = w * cos + h * sin;
+      const aabbH = w * sin + h * cos;
+      const cx = layer.cx ?? this.docWidth / 2;
+      const cy = layer.cy ?? this.docHeight / 2;
+      minX = cx - aabbW / 2;
+      maxX = cx + aabbW / 2;
+      minY = cy - aabbH / 2;
+      maxY = cy + aabbH / 2;
+    }
     needed = Math.max(
       needed,
-      -(cx - aabbW / 2) + HANDLE_BUFFER,
-      cx + aabbW / 2 - this.docWidth + HANDLE_BUFFER,
-      -(cy - aabbH / 2) + HANDLE_BUFFER,
-      cy + aabbH / 2 - this.docHeight + HANDLE_BUFFER,
+      -minX + HANDLE_BUFFER,
+      maxX - this.docWidth + HANDLE_BUFFER,
+      -minY + HANDLE_BUFFER,
+      maxY - this.docHeight + HANDLE_BUFFER,
     );
   }
   needed = Math.min(MAX_PAD, Math.ceil(needed));
@@ -231,16 +253,34 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
     if (layer.blendMode && BLEND_MAP[layer.blendMode])
       this.ctx.globalCompositeOperation = BLEND_MAP[layer.blendMode];
 
-    this.ctx.translate(layer.cx, layer.cy);
+    // CC Power Pin: the placement frame is the pin-quad AABB, re-anchored at
+    // C' so the layer never jumps on enable/drag. Degenerate pin -> normal
+    // (unpinned) draw.
+    const Wimg = layer.img.width, Him = layer.img.height;
+    const ppSetup = layer.powerPin
+      ? powerPinSetup(layer.powerPin, Wimg, Him)
+      : null;
+    // Snap to integer pixels so strokeRect (selection box) and drawImage land on
+    // the same pixel grid — otherwise sub-pixel anti-aliasing makes the box look
+    // 1-2px larger than the image on bottom/right edges
+    let w = Math.round(Wimg * layer.scaleX);
+    let h = Math.round(Him * layer.scaleY);
+    if (ppSetup) {
+      w = Math.round(ppSetup.ow * layer.scaleX);
+      h = Math.round(ppSetup.oh * layer.scaleY);
+    }
+    const ppShift = ppSetup
+      ? powerPinAnchorShift(layer, ppSetup, Wimg, Him)
+      : null;
+
+    this.ctx.translate(
+      layer.cx + (ppShift ? ppShift.x : 0),
+      layer.cy + (ppShift ? ppShift.y : 0),
+    );
     this.ctx.rotate((layer.rotation * Math.PI) / 180);
 
     this.ctx.save();
     this.ctx.scale(layer.flippedX ? -1 : 1, layer.flippedY ? -1 : 1);
-    // Snap to integer pixels so strokeRect (selection box) and drawImage land on
-    // the same pixel grid — otherwise sub-pixel anti-aliasing makes the box look
-    // 1-2px larger than the image on bottom/right edges
-    const w = Math.round(layer.img.width * layer.scaleX);
-    const h = Math.round(layer.img.height * layer.scaleY);
 
     // Per-layer Gaussian blur — non-destructive, applied to the final composited
     // (post-mask) result. Selection box stroke is on the overlay canvas (oc),
@@ -253,8 +293,33 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       this.ctx.filter = "blur(" + r + "px)";
     }
 
-    // NON-DESTRUCTIVE MASK RENDER
-    if (layer.hasMask_internal && layer.eraserMaskCanvas_internal) {
+    if (ppSetup) {
+      // Warp the (masked) image into the pin-quad AABB. Two-tier (spec 7):
+      // <=512px preview while dragging, full-res on release / clean render.
+      let srcForWarp = layer.img;
+      if (layer.hasMask_internal && layer.eraserMaskCanvas_internal) {
+        this.renderCanvas.width = Wimg;
+        this.renderCanvas.height = Him;
+        this.renderCtx.clearRect(0, 0, Wimg, Him);
+        this.renderCtx.drawImage(layer.img, 0, 0);
+        this.renderCtx.globalCompositeOperation = "destination-out";
+        this.renderCtx.drawImage(layer.eraserMaskCanvas_internal, 0, 0);
+        this.renderCtx.globalCompositeOperation = "source-over";
+        srcForWarp = this.renderCanvas;
+      }
+      const dragging = !cleanRender && this.isMouseDown;
+      const outScale = dragging
+        ? Math.min(1, 512 / Math.max(ppSetup.ow, ppSetup.oh))
+        : 1;
+      this.ctx.drawImage(
+        warpPowerPinCanvas(srcForWarp, ppSetup, outScale),
+        -w / 2,
+        -h / 2,
+        w,
+        h,
+      );
+    } else if (layer.hasMask_internal && layer.eraserMaskCanvas_internal) {
+      // NON-DESTRUCTIVE MASK RENDER
       this.renderCanvas.width = layer.img.width;
       this.renderCanvas.height = layer.img.height;
       this.renderCtx.clearRect(
@@ -281,10 +346,47 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
     // Draw selection border & handles on overlay canvas (not clipped by main canvas)
     if (!cleanRender && isSelected && oc) {
       oc.save();
-      oc.translate(layer.cx + pad, layer.cy + pad);
-      oc.rotate((layer.rotation * Math.PI) / 180);
+      if (ppSetup) {
+        // Pinned: outline the quad through the pin doc positions (doc coords,
+        // no rotation) - the 4 corner handles double as pin handles.
+        const pinPts = pinnedPointsToDoc(layer, Wimg, Him);
+        oc.translate(pad, pad);
+        oc.strokeStyle = layer.locked
+          ? "#888"
+          : this.selectedLayerIds.size > 1
+            ? "#0ea5e9"
+            : "#f66744";
+        oc.lineWidth = 1;
+        if (layer.isPlaceholder) oc.setLineDash([6, 4]);
+        oc.beginPath();
+        oc.moveTo(pinPts[0].x, pinPts[0].y);
+        oc.lineTo(pinPts[1].x, pinPts[1].y);
+        oc.lineTo(pinPts[2].x, pinPts[2].y);
+        oc.lineTo(pinPts[3].x, pinPts[3].y);
+        oc.closePath();
+        oc.stroke();
+        oc.setLineDash([]);
+        if (
+          !layer.locked &&
+          this.selectedLayerIds.size === 1 &&
+          this.activeMode !== "eraser"
+        ) {
+          const sz = this.handleSize;
+          oc.fillStyle = "#fff";
+          oc.strokeStyle = "#f66744";
+          oc.lineWidth = 1;
+          pinPts.forEach((p) => {
+            oc.beginPath();
+            oc.arc(p.x, p.y, sz / 2, 0, Math.PI * 2);
+            oc.fill();
+            oc.stroke();
+          });
+        }
+      } else {
+        oc.translate(layer.cx + pad, layer.cy + pad);
+        oc.rotate((layer.rotation * Math.PI) / 180);
 
-      oc.strokeStyle = layer.locked
+        oc.strokeStyle = layer.locked
         ? "#888"
         : this.selectedLayerIds.size > 1
           ? "#0ea5e9"
@@ -351,6 +453,7 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
           oc.fill();
           oc.stroke();
         });
+      }
       }
       oc.restore();
     }
@@ -478,6 +581,9 @@ PixaromaEditor.prototype.attemptRestore = async function () {
           hasMask_internal: false,
           savedMaskPath_internal: mLayer.maskSrc || null,
           cropRect: mLayer.cropRect || null,
+          powerPin: mLayer.powerPin
+            ? { ...mLayer.powerPin, pins: mLayer.powerPin.pins.map((pt) => [...pt]) }
+            : null,
           sourceImg: null,
         };
         loadedCount++;
@@ -518,6 +624,9 @@ PixaromaEditor.prototype.attemptRestore = async function () {
           savedOnServer: true,
           savedMaskPath_internal: mLayer.maskSrc || null,
           cropRect: mLayer.cropRect || null,
+          powerPin: mLayer.powerPin
+            ? { ...mLayer.powerPin, pins: mLayer.powerPin.pins.map((pt) => [...pt]) }
+            : null,
           sourceImg: null,
         };
         loadedCount++;
@@ -567,6 +676,10 @@ PixaromaEditor.prototype.attemptRestore = async function () {
             // image's (out-of-bounds) rect - it would blank the marker. The
             // true cropRect stays in the saved JSON for when the file returns.
             cropRect: null,
+            // The 512px marker is not the real image - its (real-image-pixel)
+            // pins don't apply. The pin data stays in the saved JSON for when
+            // the file returns.
+            powerPin: null,
             sourceImg: null,
           };
           loadedCount++;

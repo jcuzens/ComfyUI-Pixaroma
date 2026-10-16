@@ -3,6 +3,7 @@
 // layer.sourceImg (and the untouched server src); a cropped copy is baked into
 // layer.img so all existing render/handle/eraser math keeps working unchanged.
 import { PixaromaEditor } from "./core.mjs";
+import { remapPowerPinForCrop } from "./power_pin.mjs";
 
 // Forward-transform a SOURCE-space point (lx,ly) to main-canvas coords, given
 // where the source center sits on canvas (srcCenter). Mirrors the render chain
@@ -56,6 +57,16 @@ PixaromaEditor.prototype.applyCropToLayer = function (layer, remapMask = false) 
       layer.eraserMaskCanvas_internal = nm;
       layer.eraserMaskCtx_internal = nmCtx;
     }
+    // Pin remap: the full-source frame's origin is (0,0); pins shift by the
+    // previous crop origin. In-session only (remapMask).
+    if (remapMask && layer.powerPin)
+      remapPowerPinForCrop(
+        layer,
+        0,
+        0,
+        layer._cropMaskOriginX || 0,
+        layer._cropMaskOriginY || 0,
+      );
     layer.img = layer.sourceImg;
     layer._cropMaskOriginX = 0;
     layer._cropMaskOriginY = 0;
@@ -85,6 +96,16 @@ PixaromaEditor.prototype.applyCropToLayer = function (layer, remapMask = false) 
     layer.eraserMaskCanvas_internal = newMask;
     layer.eraserMaskCtx_internal = nmCtx;
   }
+  // Pin remap: the new post-crop frame's origin is (cr.x, cr.y) in source
+  // coords; pins shift by prev - new. In-session only (remapMask).
+  if (remapMask && layer.powerPin)
+    remapPowerPinForCrop(
+      layer,
+      cr.x,
+      cr.y,
+      layer._cropMaskOriginX || 0,
+      layer._cropMaskOriginY || 0,
+    );
   layer._cropMaskOriginX = cr.x;
   layer._cropMaskOriginY = cr.y;
 

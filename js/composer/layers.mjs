@@ -1,3 +1,5 @@
+import { powerPinSetup, pinnedPointsToDoc, docPointInPinQuad } from "./power_pin.mjs";
+
 export class PixaromaLayers {
   static getTransformedPoints(layer) {
     // FX/adjustment layers have no image and no canvas geometry — return an
@@ -19,7 +21,7 @@ export class PixaromaLayers {
       { x: 0, y: -h / 2 - 30 },
     ];
 
-    return ptsIdentity.map((p) => {
+    const pts = ptsIdentity.map((p) => {
       const mx = p.x * (layer.flippedX ? -1 : 1);
       const my = p.y * (layer.flippedY ? -1 : 1);
       return {
@@ -27,11 +29,30 @@ export class PixaromaLayers {
         y: mx * Math.sin(rad) + my * Math.cos(rad) + layer.cy,
       };
     });
+
+    // Pinned: the 4 corner points become the pin positions (handles double as
+    // pin handles). pts[4..8] keep affine values - all edge/rotation handle
+    // code paths gate on !layer.powerPin.
+    if (layer.powerPin) {
+      const W = layer.img.width;
+      const H = layer.img.height;
+      if (powerPinSetup(layer.powerPin, W, H)) {
+        const pinPts = pinnedPointsToDoc(layer, W, H);
+        for (let i = 0; i < 4; i++) pts[i] = pinPts[i];
+      }
+    }
+    return pts;
   }
 
   static isPointInLayer(px, py, layer) {
     // FX/adjustment layers aren't clickable on the canvas (no geometry).
     if (!layer || !layer.img) return false;
+    if (layer.powerPin) {
+      const W = layer.img.width;
+      const H = layer.img.height;
+      if (powerPinSetup(layer.powerPin, W, H))
+        return docPointInPinQuad(layer, px, py, W, H);
+    }
     const w = layer.img.width * layer.scaleX;
     const h = layer.img.height * layer.scaleY;
     const rad = (layer.rotation * Math.PI) / 180;
@@ -66,6 +87,9 @@ export class PixaromaLayers {
       // Deep-copy cropRect so undo/redo snapshots are independent (the live
       // layer always assigns a NEW cropRect object, but be safe).
       if (l.cropRect) copy.cropRect = { ...l.cropRect };
+      // Deep-copy powerPin so undo/redo snapshots don't alias the live pins.
+      if (l.powerPin)
+        copy.powerPin = { ...l.powerPin, pins: l.powerPin.pins.map((pt) => [...pt]) };
       // Deep-copy FX adjustments so undo/redo snapshots don't alias the live
       // layer's adjustments object.
       if (l.adjustments) copy.adjustments = { ...l.adjustments };
