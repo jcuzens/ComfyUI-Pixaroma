@@ -9,6 +9,11 @@ import {
   warpPowerPinCanvas,
   warpPowerPinCanvasAA,
 } from "./power_pin.mjs";
+import {
+  featherRadiusPx,
+  edgeBlurRadiusPx,
+  borderFadeCanvas,
+} from "./feather.mjs";
 
 // Clone a layer for history restore. Shallow-copy the layer, but DEEP-copy the
 // mutable sub-objects the panels edit IN PLACE (adjustments / textState /
@@ -283,6 +288,21 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
     this.ctx.save();
     this.ctx.scale(layer.flippedX ? -1 : 1, layer.flippedY ? -1 : 1);
 
+    // Border fade (feather + edge blur) in display space — post scale/flip,
+    // pre rotation/paste, matching _apply_layer_transform's pre_display hook.
+    // Treated canvas is cached; fast slider input renders at <=512px.
+    const fadeF = featherRadiusPx(layer.feather);
+    const fadeR = edgeBlurRadiusPx(layer.edgeBlur);
+    const drawDisplay = (src) => {
+      const reduced = !cleanRender &&
+        performance.now() - (this._lastFadeInput || 0) < 150;
+      const treated =
+        fadeF > 0 || fadeR > 0
+          ? this._borderFadeCanvas(layer, src, w, h, reduced)
+          : null;
+      this.ctx.drawImage(treated || src, -w / 2, -h / 2, w, h);
+    };
+
     // Per-layer Gaussian blur — non-destructive, applied to the final composited
     // (post-mask) result. Selection box stroke is on the overlay canvas (oc),
     // so it stays sharp regardless of this filter.
@@ -317,7 +337,7 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       const warped = dragging
         ? warpPowerPinCanvas(srcForWarp, ppSetup, outScale)
         : this._cachedPowerPinWarp(layer, ppSetup, srcForWarp);
-      this.ctx.drawImage(warped, -w / 2, -h / 2, w, h);
+      drawDisplay(warped);
     } else if (layer.hasMask_internal && layer.eraserMaskCanvas_internal) {
       // NON-DESTRUCTIVE MASK RENDER
       this.renderCanvas.width = layer.img.width;
@@ -334,9 +354,9 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       this.renderCtx.drawImage(layer.eraserMaskCanvas_internal, 0, 0);
       this.renderCtx.globalCompositeOperation = "source-over";
 
-      this.ctx.drawImage(this.renderCanvas, -w / 2, -h / 2, w, h);
+      drawDisplay(this.renderCanvas);
     } else {
-      this.ctx.drawImage(layer.img, -w / 2, -h / 2, w, h);
+      drawDisplay(layer.img);
     }
 
     this.ctx.filter = "none";
@@ -495,6 +515,28 @@ PixaromaEditor.prototype._cachedPowerPinWarp = function (layer, ppSetup, srcForW
   return canvas;
 };
 
+// Full-quality border-fade canvas (feather + edge blur), cached per layer
+// like the pinned warp. The per-pixel pass is too heavy for every frame on a
+// large layer, so fast slider input (events <150ms apart, see
+// _lastFadeInput in ui.mjs) renders the treatment at <=512px and a quiet
+// render recomputes full quality.
+PixaromaEditor.prototype._borderFadeCanvas = function (layer, src, w, h, reduced) {
+  const F = featherRadiusPx(layer.feather);
+  const R = edgeBlurRadiusPx(layer.edgeBlur);
+  if (!(F > 0) && !(R > 0)) return null;
+  const s = reduced ? Math.min(1, 512 / Math.max(w, h)) : 1;
+  const rw = Math.max(1, Math.round(w * s));
+  const rh = Math.max(1, Math.round(h * s));
+  if (!this._bfCache) this._bfCache = new Map();
+  const key = JSON.stringify([rw, rh, F, R, layer._ppMaskStamp || 0]);
+  const hit = this._bfCache.get(layer.id);
+  if (hit && hit.key === key && hit.src === src && hit.img === layer.img)
+    return hit.canvas;
+  const canvas = borderFadeCanvas(src, rw, rh, F * s, R * s);
+  this._bfCache.set(layer.id, { key, src, img: layer.img, canvas });
+  return canvas;
+};
+
 PixaromaEditor.prototype.attemptRestore = async function () {
   let savedData = null;
   const composerWidget = (this.node.widgets || []).find(
@@ -601,6 +643,8 @@ PixaromaEditor.prototype.attemptRestore = async function () {
           flippedY: mLayer.flippedY,
           blendMode: mLayer.blendMode || "Normal",
           blur: mLayer.blur || 0,
+          feather: mLayer.feather || 0,
+          edgeBlur: mLayer.edgeBlur || 0,
           rawB64_internal: null,
           rawServerPath: "__placeholder__",
           savedOnServer: true,
@@ -645,6 +689,8 @@ PixaromaEditor.prototype.attemptRestore = async function () {
           flippedY: mLayer.flippedY,
           blendMode: mLayer.blendMode || "Normal",
           blur: mLayer.blur || 0,
+          feather: mLayer.feather || 0,
+          edgeBlur: mLayer.edgeBlur || 0,
           removeBgOnExec: !!mLayer.removeBgOnExec,
           bgRemovalQuality: mLayer.bgRemovalQuality,
           rawB64_internal: null,
@@ -694,6 +740,8 @@ PixaromaEditor.prototype.attemptRestore = async function () {
             flippedY: mLayer.flippedY,
             blendMode: mLayer.blendMode || "Normal",
             blur: mLayer.blur || 0,
+            feather: mLayer.feather || 0,
+            edgeBlur: mLayer.edgeBlur || 0,
             removeBgOnExec: !!mLayer.removeBgOnExec,
             bgRemovalQuality: mLayer.bgRemovalQuality,
             rawB64_internal: null,

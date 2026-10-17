@@ -576,6 +576,12 @@ PixaromaEditor.prototype.attachEvents = function () {
   syncSliderTrans(this.rotateSlider, this.rotateNum, "rotation", 1);
   syncSliderTrans(this.scaleSlider, this.scaleNum, "scale", 100);
   syncSliderTrans(this.blurSlider, this.blurNum, "blur", 1);
+  syncSliderTrans(this.featherSlider, this.featherNum, "feather", 1);
+  syncSliderTrans(this.edgeBlurSlider, this.edgeBlurNum, "edgeBlur", 1);
+  // Border-fade sliders are per-pixel (cached, two-tier): render.mjs reads
+  // _lastFadeInput to decide the <=512px preview tier during fast input.
+  for (const s of [this.featherSlider, this.edgeBlurSlider])
+    s.addEventListener("input", () => (this._lastFadeInput = performance.now()));
 
   const syncSliderStretch = (slider, num, prop, multiplier = 100) => {
     const updateCanvas = (val) => {
@@ -641,6 +647,8 @@ PixaromaEditor.prototype.attachEvents = function () {
       l.flippedY = false;
       l.opacity = 1;
       l.blur = 0;
+      l.feather = 0;
+      l.edgeBlur = 0;
       PixaromaLayers.fitLayerToCanvas(
         l,
         this.docWidth,
@@ -915,6 +923,8 @@ PixaromaEditor.prototype.attachEvents = function () {
         if (layer.bgRemovalQuality && layer.bgRemovalQuality !== "normal") layerEntry.bgRemovalQuality = layer.bgRemovalQuality;
         if (layer.blendMode && layer.blendMode !== "Normal") layerEntry.blendMode = layer.blendMode;
         if (layer.blur && layer.blur > 0) layerEntry.blur = layer.blur;
+        if (layer.feather && layer.feather > 0) layerEntry.feather = layer.feather;
+        if (layer.edgeBlur && layer.edgeBlur > 0) layerEntry.edgeBlur = layer.edgeBlur;
         // cropRect is in SOURCE-image pixels. src above is the full uncropped
         // source (rawServerPath is never overwritten by cropping), so the crop
         // stays re-editable after reload.

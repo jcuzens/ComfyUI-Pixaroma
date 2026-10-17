@@ -18,6 +18,7 @@ import {
 
 // Import core class first, then mixins as side-effects
 import { powerPinSetup, powerPinAnchorShift, warpPowerPinCanvas, warpPowerPinCanvasAA } from "./power_pin.mjs";
+import { featherRadiusPx, edgeBlurRadiusPx, borderFadeCanvas } from "./feather.mjs";
 import { PixaromaEditor } from "./core.mjs";
 import "./eraser.mjs";
 import "./crop.mjs";
@@ -383,6 +384,18 @@ app.registerExtension({
 
         const cx = layer.cx ?? docW / 2, cy = layer.cy ?? docH / 2;
         const rot = (layer.rotation || 0) * Math.PI / 180;
+        // Border fade (feather + edge blur) in display space — same stage and
+        // order as editor _drawImpl + the Python pre_display hook. No cache:
+        // the preview composites once per execution.
+        const fadeF = featherRadiusPx(layer.feather);
+        const fadeR = edgeBlurRadiusPx(layer.edgeBlur);
+        const drawDisplay = (src, dw, dh) => {
+          const treated =
+            fadeF > 0 || fadeR > 0
+              ? borderFadeCanvas(src, dw, dh, fadeF, fadeR)
+              : null;
+          ctx.drawImage(treated || src, -dw / 2, -dh / 2, dw, dh);
+        };
         const ppSetup = layer.powerPin
           ? powerPinSetup(layer.powerPin, natW, natH)
           : null;
@@ -404,7 +417,7 @@ app.registerExtension({
           ctx.translate(cx + shift.x, cy + shift.y);
           ctx.rotate(rot);
           ctx.scale(layer.flippedX ? -1 : 1, layer.flippedY ? -1 : 1);
-          ctx.drawImage(warped, -pw / 2, -ph / 2, pw, ph);
+          drawDisplay(warped, pw, ph);
           ctx.restore();
           return;
         }
@@ -419,7 +432,7 @@ app.registerExtension({
         ctx.translate(cx, cy);
         ctx.rotate(rot);
         ctx.scale(layer.flippedX ? -1 : 1, layer.flippedY ? -1 : 1);
-        ctx.drawImage(src, -w / 2, -h / 2, w, h);
+        drawDisplay(src, w, h);
         ctx.restore();
       }
 

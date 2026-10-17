@@ -524,14 +524,118 @@ def _apply_power_pin(img, pp, ss=1):
     return Image.fromarray(np.rint(out).astype(np.uint8), "RGBA"), ox, oy, ow, oh
 
 
-def _apply_layer_transform(img, layer, doc_w, doc_h):
-    """Apply layer transforms and return a doc-sized RGBA canvas."""
+# ── Per-layer border fade (feather + edge blur) ─────────────────────────────
+# Single source of truth for the math is docs/composer-feather-math.md.
+# Mirrored 1:1 by js/composer/feather.mjs. Keep them in lockstep.
+#
+# The treatment runs in DISPLAY space (post scale/flip, pre rotation/paste):
+# a rotation preserves distance, so a rotated layer keeps a uniform band; the
+# band width is in the layer's display pixels. Feather fades the alpha to 0
+# over the last F px of the border; edge blur blends a gaussian-blurred copy
+# of the RGB (sigma = R) in over the last R px so a hard border colour does
+# not survive as a seam inside the fade.
+
+FEATHER_MAX_PX = 200.0
+EDGE_BLUR_MAX_PX = 50.0
+
+
+def _slider_to_px(slider, max_px):
+    """Slider 0-100 -> radius in px, quadratic (same pattern as the layer
+    blur: (v/100)^2 * max). Unreadable values read as 0 (no fade)."""
+    try:
+        v = float(slider)
+    except (TypeError, ValueError):
+        return 0.0
+    v = min(100.0, max(0.0, v)) / 100.0
+    return v * v * max_px
+
+
+def _feather_radius_px(slider):
+    return _slider_to_px(slider, FEATHER_MAX_PX)
+
+
+def _edge_blur_radius_px(slider):
+    return _slider_to_px(slider, EDGE_BLUR_MAX_PX)
+
+
+def _border_profile(d, r):
+    """smoothstep falloff of the distance d (px) to the border over radius r:
+    0 for d <= 0, 1 for d >= r; r <= 0 -> 1 (no fade). Scalar or array."""
+    d = np.asarray(d, dtype=np.float32)
+    if not (r > 0):
+        return np.ones_like(d)
+    t = np.clip(d / r, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _border_fade_arr(arr, w, h, feather_px, edge_blur_px, blurred=None):
+    """Display-space border treatment on an RGBA (h, w, 4) uint8 buffer:
+    edge blur (RGB only) blended in over the last edge_blur_px of the border,
+    then feather (alpha) fading to 0 over the last feather_px. `blurred` is a
+    precomputed (h, w, 3) RGB gaussian (sigma = edge_blur_px); required when
+    edge_blur_px > 0. np.rint stores round-half-to-even — parity with the
+    Uint8ClampedArray store in js/composer/feather.mjs."""
+    a = np.asarray(arr)
+    if not (feather_px > 0) and not (edge_blur_px > 0):
+        return a.copy()
+    x = np.arange(w, dtype=np.float32)[None, :]
+    y = np.arange(h, dtype=np.float32)[:, None]
+    d = np.minimum(np.minimum(x, w - 1.0 - x), np.minimum(y, h - 1.0 - y))
+    out = a.astype(np.float32).copy()
+    if edge_blur_px > 0:
+        m = _border_profile(d, edge_blur_px)[..., None]
+        b = np.asarray(blurred, dtype=np.float32)
+        out[..., :3] = m * a[..., :3] + (1.0 - m) * b
+    if feather_px > 0:
+        out[..., 3] = a[..., 3] * _border_profile(d, feather_px)
+    return np.rint(np.clip(out, 0, 255)).astype(np.uint8)
+
+
+def _apply_border_fade(img, feather_px, edge_blur_px):
+    """PIL entry: border treatment on a display-sized layer RGBA image. The
+    edge blur is a PIL gaussian (sigma = radius, edge-clamped) on the RGB
+    channels; the alpha channel is left for the feather."""
+    if not (feather_px > 0) and not (edge_blur_px > 0):
+        return img
+    w, h = img.size
+    blurred = None
+    if edge_blur_px > 0:
+        blurred = np.stack([
+            np.asarray(
+                img.getchannel(c).filter(ImageFilter.GaussianBlur(radius=edge_blur_px))
+            )
+            for c in range(3)
+        ], axis=-1)
+    return Image.fromarray(
+        _border_fade_arr(np.asarray(img), w, h, feather_px, edge_blur_px, blurred),
+        "RGBA",
+    )
+
+
+def _border_fade_pre(layer):
+    """Pre-paste display-space hook for _apply_layer_transform: None when
+    both sliders are 0 (byte-identical path), else a function that applies
+    the border treatment to the display-sized layer image."""
+    f = _feather_radius_px(layer.get("feather", 0))
+    r = _edge_blur_radius_px(layer.get("edgeBlur", 0))
+    if not (f > 0) and not (r > 0):
+        return None
+    return lambda img: _apply_border_fade(img, f, r)
+
+
+def _apply_layer_transform(img, layer, doc_w, doc_h, pre_display=None):
+    """Apply layer transforms and return a doc-sized RGBA canvas.
+    pre_display, when given, receives the display-sized (post resize, pre
+    flip/rotate) layer image and returns the image to place — the border
+    fade hook runs there so its band is measured in display pixels."""
     nat_w, nat_h = img.size
     scale_x = abs(layer.get("scaleX", 1.0))
     scale_y = abs(layer.get("scaleY", 1.0))
     new_w = max(1, int(nat_w * scale_x))
     new_h = max(1, int(nat_h * scale_y))
     img = img.resize((new_w, new_h), Image.LANCZOS)
+    if pre_display is not None:
+        img = pre_display(img)
 
     if layer.get("flippedX"):
         img = img.transpose(Image.FLIP_LEFT_RIGHT)
@@ -589,7 +693,10 @@ class PixaromaImageComposition:
         "rotate them with handles, and apply per-layer effects: opacity, blend "
         "modes (Normal, Multiply, Screen, Overlay, Darken, Lighten, Color "
         "Dodge, Color Burn, Hard Light, Soft Light, Difference, Exclusion, "
-        "Hue, Saturation, Color, Luminosity), Gaussian blur, CC Power Pin (4-corner warp with perspective / expand / unstretch, [P]), and AI background "
+        "Hue, Saturation, Color, Luminosity), Gaussian blur, border feather + "
+        "edge blur (the layer border fades into the canvas so it composites "
+        "back in without a hard edge), CC Power Pin (4-corner warp with "
+        "perspective / expand / unstretch, [P]), and AI background "
         "removal (rembg-powered, picks the best installed model: birefnet -> "
         "isnet -> u2net auto-fallback).\n\n"
         "Eraser tool lets you mask any layer non-destructively. Per-layer blur "
@@ -786,7 +893,10 @@ class PixaromaImageComposition:
                                 layer_img, pox, poy, pow_, poh = res
                                 cx2, cy2 = _power_pin_center(layer, nat_w, nat_h, pox, poy, pow_, poh)
                                 layer = {**layer, "cx": cx2, "cy": cy2}
-                        composed = _apply_layer_transform(layer_img, layer, doc_w, doc_h)
+                        composed = _apply_layer_transform(
+                            layer_img, layer, doc_w, doc_h,
+                            pre_display=_border_fade_pre(layer),
+                        )
                         # Quadratic curve: slider 0-100 maps to actual blur 0-50px
                         # (finer control at low end). Mirrored in
                         # js/composer/render.mjs + js/composer/index.js.

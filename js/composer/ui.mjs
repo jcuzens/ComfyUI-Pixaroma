@@ -206,6 +206,8 @@ export class PixaromaUI {
       if (core._layerPanel && core._layerPanel.setOpacity) core._layerPanel.setOpacity(Math.round((_activeLayer.opacity ?? 1) * 100));
       if (core.opacitySlider) { core.opacitySlider.value = Math.round(_activeLayer.opacity * 100); core.opacityNum.value = Math.round(_activeLayer.opacity * 100); }
       if (core.blurSlider) { core.blurSlider.value = _activeLayer.blur || 0; core.blurNum.value = _activeLayer.blur || 0; }
+      if (core.featherSlider) { core.featherSlider.value = _activeLayer.feather || 0; core.featherNum.value = _activeLayer.feather || 0; }
+      if (core.edgeBlurSlider) { core.edgeBlurSlider.value = _activeLayer.edgeBlur || 0; core.edgeBlurNum.value = _activeLayer.edgeBlur || 0; }
       if (core.rotateSlider) { core.rotateSlider.value = _activeLayer.rotation; core.rotateNum.value = _activeLayer.rotation; }
       if (core.scaleSlider) { core.scaleSlider.value = Math.round(_activeLayer.scaleX * 100); core.scaleNum.value = Math.round(_activeLayer.scaleX * 100); }
       if (core.stretchHSlider) { core.stretchHSlider.value = Math.round(_activeLayer.scaleX * 100); core.stretchHNum.value = Math.round(_activeLayer.scaleX * 100); }
@@ -354,6 +356,10 @@ export class PixaromaUI {
         core.opacityNum.value = Math.round(layer.opacity * 100);
         core.blurSlider.value = layer.blur || 0;
         core.blurNum.value = layer.blur || 0;
+        core.featherSlider.value = layer.feather || 0;
+        core.featherNum.value = layer.feather || 0;
+        core.edgeBlurSlider.value = layer.edgeBlur || 0;
+        core.edgeBlurNum.value = layer.edgeBlur || 0;
         core.rotateSlider.value = layer.rotation;
         core.rotateNum.value = layer.rotation;
         core.scaleSlider.value = Math.round(layer.scaleX * 100);
@@ -902,6 +908,8 @@ export class PixaromaUI {
             rotation: 0,
             opacity: 1,
             blur: 0,
+            feather: 0,
+            edgeBlur: 0,
             visible: true,
             locked: false,
             flippedX: false,
@@ -1191,6 +1199,30 @@ export class PixaromaUI {
     core.blurSlider = tp.blurSlider;
     core.blurNum = tp.blurNum;
 
+    // Border fade (feather + edge blur): fades the layer's rectangular border
+    // into the background. Composer-only rows — appended to the Transform
+    // Properties panel content (the shared component never sees them; Paint/3D
+    // don't use them). Wired like the blur slider in interaction.mjs.
+    tp.content.appendChild(createDivider());
+    const featherRow = createSliderRow("Feather", 0, 100, 0, null, {
+      step: 1,
+      labelWidth: "70px",
+    });
+    featherRow.el.title =
+      "Fade the layer border's opacity to 0 over the last pixels";
+    tp.content.appendChild(featherRow.el);
+    core.featherSlider = featherRow.slider;
+    core.featherNum = featherRow.numInput;
+    const edgeBlurRow = createSliderRow("Edge Blur", 0, 100, 0, null, {
+      step: 1,
+      labelWidth: "70px",
+    });
+    edgeBlurRow.el.title =
+      "Blur the RGB inside the border band so hard edge colours do not survive the fade";
+    tp.content.appendChild(edgeBlurRow.el);
+    core.edgeBlurSlider = edgeBlurRow.slider;
+    core.edgeBlurNum = edgeBlurRow.numInput;
+
     layout.leftSidebar.appendChild(core.toolsPanel);
 
     // FX Adjustments panel — occupies the Transform Properties slot when an FX
@@ -1362,6 +1394,8 @@ export class PixaromaUI {
               locked: false,
               opacity: 1,
               blur: 0,
+              feather: 0,
+              edgeBlur: 0,
               cx: core.docWidth / 2,
               cy: core.docHeight / 2,
               scaleX: 1,
