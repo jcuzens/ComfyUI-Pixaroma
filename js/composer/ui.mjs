@@ -334,6 +334,7 @@ export class PixaromaUI {
             if (row) row.setValue(pp[key] ?? (key === "perspective" ? 100 : 0));
           }
           if (core.ppUnstretchChk) core.ppUnstretchChk.checked = !!pp.unstretch;
+          if (core.ppAAChk) core.ppAAChk.checked = !!pp.aa;
           if (core.btnResetPowerPin) {
             core.btnResetPowerPin.style.opacity = "1";
             core.btnResetPowerPin.disabled = false;
@@ -1663,6 +1664,27 @@ export class PixaromaUI {
     unstretchRow.appendChild(unstretchChk);
     powerPinPanel.content.appendChild(unstretchRow);
     core.ppUnstretchChk = unstretchChk;
+
+    const aaRow = document.createElement("div");
+    aaRow.className = "pxf-slider-row";
+    const aaLbl = document.createElement("label");
+    aaLbl.className = "pxf-slider-label";
+    aaLbl.textContent = "Antialias";
+    aaLbl.style.width = "72px";
+    aaRow.appendChild(aaLbl);
+    const aaChk = document.createElement("input");
+    aaChk.type = "checkbox";
+    aaChk.title = "4x supersampled warp - smoother edges (cached)";
+    aaChk.addEventListener("change", () => {
+      const layer = core.getActiveLayer();
+      if (!layer || !layer.powerPin) return;
+      layer.powerPin.aa = aaChk.checked;
+      core.draw();
+      core.pushHistory();
+    });
+    aaRow.appendChild(aaChk);
+    powerPinPanel.content.appendChild(aaRow);
+    core.ppAAChk = aaChk;
 
     layout.rightSidebar.insertBefore(core.powerPinPanel, layout.sidebarFooter);
 

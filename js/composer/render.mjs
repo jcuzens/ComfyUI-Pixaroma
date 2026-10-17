@@ -7,6 +7,7 @@ import {
   pinnedPointsToDoc,
   powerPinAnchorShift,
   warpPowerPinCanvas,
+  warpPowerPinCanvasAA,
 } from "./power_pin.mjs";
 
 // Clone a layer for history restore. Shallow-copy the layer, but DEEP-copy the
@@ -311,13 +312,12 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       const outScale = dragging
         ? Math.min(1, 512 / Math.max(ppSetup.ow, ppSetup.oh))
         : 1;
-      this.ctx.drawImage(
-        warpPowerPinCanvas(srcForWarp, ppSetup, outScale),
-        -w / 2,
-        -h / 2,
-        w,
-        h,
-      );
+      // Drag: cheap preview. Idle / clean: cached full-quality warp (4x SS
+      // when the layer's antialias toggle is on) - see _cachedPowerPinWarp.
+      const warped = dragging
+        ? warpPowerPinCanvas(srcForWarp, ppSetup, outScale)
+        : this._cachedPowerPinWarp(layer, ppSetup, srcForWarp);
+      this.ctx.drawImage(warped, -w / 2, -h / 2, w, h);
     } else if (layer.hasMask_internal && layer.eraserMaskCanvas_internal) {
       // NON-DESTRUCTIVE MASK RENDER
       this.renderCanvas.width = layer.img.width;
@@ -465,6 +465,34 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
     this.drawCropOverlay();
 
   this.ctx.globalAlpha = 1.0;
+};
+
+// Full-quality pinned warp, cached per layer. The 4x supersample pass costs
+// ~1s on a large layer, so the canvas is only rewarped when the source image,
+// the mask (stamp + canvas identity), or the pin params change. Drag previews
+// never touch this cache (they use the cheap outScale<1 path).
+PixaromaEditor.prototype._cachedPowerPinWarp = function (layer, ppSetup, srcForWarp) {
+  if (!this._ppWarpCache) this._ppWarpCache = new Map();
+  const mask =
+    layer.hasMask_internal && layer.eraserMaskCanvas_internal
+      ? layer.eraserMaskCanvas_internal
+      : null;
+  const key = JSON.stringify([
+    ppSetup.ox, ppSetup.oy, ppSetup.ow, ppSetup.oh,
+    ppSetup.q, ppSetup.p,
+    ppSetup.x0, ppSetup.y0, ppSetup.x1, ppSetup.y1,
+    ppSetup.unstretch,
+    layer.powerPin.aa ? 1 : 0,
+    layer._ppMaskStamp || 0,
+  ]);
+  const hit = this._ppWarpCache.get(layer.id);
+  if (hit && hit.key === key && hit.img === layer.img && hit.mask === mask)
+    return hit.canvas;
+  const canvas = layer.powerPin.aa
+    ? warpPowerPinCanvasAA(srcForWarp, ppSetup, 4)
+    : warpPowerPinCanvas(srcForWarp, ppSetup);
+  this._ppWarpCache.set(layer.id, { key, img: layer.img, mask, canvas });
+  return canvas;
 };
 
 PixaromaEditor.prototype.attemptRestore = async function () {

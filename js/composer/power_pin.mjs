@@ -215,9 +215,31 @@ export function warpPowerPinToBuffer(src, sw, sh, setup, outScale = 1) {
   return { data: out, w: owOut, h: ohOut };
 }
 
-// DOM wrapper: draw the source into a full-res scratch canvas, warp, wrap the
-// result in a canvas. source = HTMLImageElement | HTMLCanvasElement.
-export function warpPowerPinCanvas(source, setup, outScale = 1) {
+// Supersampled warp (the per-layer antialias toggle): warps at ss pixels per
+// output pixel, then box-averages each ss*ss block back to (ow, oh). The
+// integer sum is exact (< 2^24) and the clamped store rounds half-to-even —
+// pixel-identical to the Python reshape-mean + np.rint (parity).
+export function warpPowerPinToBufferAA(src, sw, sh, setup, ss = 4) {
+  const r = warpPowerPinToBuffer(src, sw, sh, setup, ss);
+  const w = r.w / ss;
+  const h = r.h / ss;
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let j = 0; j < h; j++)
+    for (let i = 0; i < w; i++) {
+      const o = (i + j * w) * 4;
+      for (let c = 0; c < 4; c++) {
+        let s = 0;
+        for (let dy = 0; dy < ss; dy++)
+          for (let dx = 0; dx < ss; dx++)
+            s += r.data[((j * ss + dy) * r.w + (i * ss + dx)) * 4 + c];
+        out[o + c] = s / (ss * ss);
+      }
+    }
+  return { data: out, w, h };
+}
+
+// Read a DOM source (HTMLImageElement | HTMLCanvasElement) into raw RGBA.
+function sourceToRGBA(source) {
   const sw = source.naturalWidth || source.width;
   const sh = source.naturalHeight || source.height;
   const scratch = document.createElement("canvas");
@@ -225,8 +247,24 @@ export function warpPowerPinCanvas(source, setup, outScale = 1) {
   scratch.height = sh;
   const sctx = scratch.getContext("2d", { willReadFrequently: true });
   sctx.drawImage(source, 0, 0);
-  const srcData = sctx.getImageData(0, 0, sw, sh).data;
-  const r = warpPowerPinToBuffer(srcData, sw, sh, setup, outScale);
+  return { data: sctx.getImageData(0, 0, sw, sh).data, sw, sh };
+}
+
+// DOM wrapper: draw the source into a full-res scratch canvas, warp, wrap the
+// result in a canvas. source = HTMLImageElement | HTMLCanvasElement.
+export function warpPowerPinCanvas(source, setup, outScale = 1) {
+  const { data, sw, sh } = sourceToRGBA(source);
+  const r = warpPowerPinToBuffer(data, sw, sh, setup, outScale);
+  return canvasFromBuffer(r);
+}
+
+// DOM wrapper for the supersampled warp (full-quality antialias pass).
+export function warpPowerPinCanvasAA(source, setup, ss = 4) {
+  const { data, sw, sh } = sourceToRGBA(source);
+  return canvasFromBuffer(warpPowerPinToBufferAA(data, sw, sh, setup, ss));
+}
+
+function canvasFromBuffer(r) {
   const out = document.createElement("canvas");
   out.width = r.w;
   out.height = r.h;

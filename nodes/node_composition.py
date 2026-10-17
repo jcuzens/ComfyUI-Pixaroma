@@ -439,11 +439,14 @@ def _power_pin_setup(pp, W, H):
             "h": h, "inv": inv, "W": W, "H": H}
 
 
-def _apply_power_pin(img, pp):
+def _apply_power_pin(img, pp, ss=1):
     """CC Power Pin warp (spec 3). img = post-crop, post-mask PIL RGBA.
     Returns (warped_RGBA, ox, oy, ow, oh) or None when pp is absent / the quad
     is degenerate (caller renders the layer unpinned). Vectorized, row-tiled
-    (inverse-map + gather needs no halo; tiles bound peak memory only)."""
+    (inverse-map + gather needs no halo; tiles bound peak memory only).
+    ss>1 supersamples the output grid (1/ss px step) and box-averages back
+    down to (ow, oh) - the per-layer 4x antialias toggle; ss=1 is the
+    pre-existing path, unchanged."""
     setup = _power_pin_setup(pp, img.width, img.height) if isinstance(pp, dict) else None
     if setup is None:
         return None
@@ -452,12 +455,12 @@ def _apply_power_pin(img, pp):
     x0, y0, x1, y1 = setup["x0"], setup["y0"], setup["x1"], setup["y1"]
     unstretch, ox, oy, ow, oh = setup["unstretch"], setup["ox"], setup["oy"], setup["ow"], setup["oh"]
     src = np.asarray(img.convert("RGBA"), dtype=np.float32)  # (H, W, 4)
-    out = np.zeros((oh, ow, 4), dtype=np.float32)
-    xs = (np.arange(ow) + 0.5) + ox
+    out = np.zeros((oh * ss, ow * ss, 4), dtype=np.float32)
+    xs = (np.arange(ow * ss) + 0.5) / ss + ox
     TILE = 256
-    for ty0 in range(0, oh, TILE):
-        ty1 = min(oh, ty0 + TILE)
-        PX, PY = np.meshgrid(xs, (np.arange(ty0, ty1) + 0.5) + oy)
+    for ty0 in range(0, oh * ss, TILE):
+        ty1 = min(oh * ss, ty0 + TILE)
+        PX, PY = np.meshgrid(xs, (np.arange(ty0, ty1) + 0.5) / ss + oy)
         if not unstretch:
             h = setup["inv"]
             w = h[6] * PX + h[7] * PY + 1.0
@@ -512,6 +515,12 @@ def _apply_power_pin(img, pp):
         FYe = FY[..., None]
         samp = (c00 * (1.0 - FXe) + c10 * FXe) * (1.0 - FYe) + (c01 * (1.0 - FXe) + c11 * FXe) * FYe
         out[ty0:ty1] = np.where(good[..., None], samp, 0.0)
+    if ss > 1:
+        # Exact box average: each output pixel is the mean of its ss*ss
+        # supersamples. float32 keeps the 16-term sum exact (<= 16*255), so
+        # np.rint lands on the same round-half-to-even as the JS clamped
+        # array. (oh, ss, ow, ss, 4) -> mean over both sample axes.
+        out = out.reshape(oh, ss, ow, ss, 4).mean(axis=(1, 3))
     return Image.fromarray(np.rint(out).astype(np.uint8), "RGBA"), ox, oy, ow, oh
 
 
@@ -764,7 +773,9 @@ class PixaromaImageComposition:
                         pp = layer.get("powerPin")
                         if pp:
                             nat_w, nat_h = layer_img.size
-                            res = _apply_power_pin(layer_img, pp)
+                            # Per-layer 4x supersample antialias toggle (mirrors
+                            # the js/composer/render.mjs warp path).
+                            res = _apply_power_pin(layer_img, pp, ss=4 if pp.get("aa") else 1)
                             if res is None:
                                 print("[Pixaroma] Composer: degenerate power-pin quad, layer rendered unpinned")
                             else:

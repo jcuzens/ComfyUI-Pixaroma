@@ -710,8 +710,11 @@ PixaromaEditor.prototype.attachEvents = function () {
 
   this.btnDelLayer.addEventListener("click", () => {
     if (this.selectedLayerIds.size === 0) return;
+    const delIds = [...this.selectedLayerIds];
     // Keep locked layers even if they're part of the selection.
     this.layers = this.layers.filter((l) => !this.selectedLayerIds.has(l.id) || l.locked);
+    if (this._ppWarpCache)
+      delIds.forEach((id) => this._ppWarpCache.delete(id));
     this.selectedLayerIds.clear();
     this.syncActiveLayerIndex();
     this.ui.updateActiveLayerUI();
@@ -1272,6 +1275,7 @@ PixaromaEditor.prototype._togglePowerPin = function () {
       expandRight: 0,
       expandBottom: 0,
       unstretch: false,
+      aa: false,
     };
     if (this._layout)
       this._layout.setStatus(

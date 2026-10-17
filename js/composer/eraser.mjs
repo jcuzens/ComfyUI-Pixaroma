@@ -55,6 +55,7 @@ PixaromaEditor.prototype.prepareLayerMask = function (
     maskImg.crossOrigin = "Anonymous";
     maskImg.onload = () => {
       layer.eraserMaskCtx_internal.drawImage(maskImg, 0, 0);
+      layer._ppMaskStamp = (layer._ppMaskStamp || 0) + 1;
       layer.hasMask_internal = true;
       this.ui.updateActiveLayerUI();
       this.draw();
@@ -71,6 +72,7 @@ PixaromaEditor.prototype.clearEraserMask = function (layer, skipRefresh) {
       layer.eraserMaskCanvas_internal.width,
       layer.eraserMaskCanvas_internal.height,
     );
+    layer._ppMaskStamp = (layer._ppMaskStamp || 0) + 1;
     layer.hasMask_internal = false;
     layer.savedMaskPath_internal = null;
     if (!skipRefresh) {

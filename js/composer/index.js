@@ -17,7 +17,7 @@ import {
 } from "../shared/index.mjs";
 
 // Import core class first, then mixins as side-effects
-import { powerPinSetup, powerPinAnchorShift, warpPowerPinCanvas } from "./power_pin.mjs";
+import { powerPinSetup, powerPinAnchorShift, warpPowerPinCanvas, warpPowerPinCanvasAA } from "./power_pin.mjs";
 import { PixaromaEditor } from "./core.mjs";
 import "./eraser.mjs";
 import "./crop.mjs";
@@ -389,7 +389,9 @@ app.registerExtension({
         if (ppSetup) {
           // CC Power Pin (matches editor _drawImpl + the Python dynamic path):
           // warp the masked image into the pin-quad AABB, place at C'.
-          const warped = warpPowerPinCanvas(src, ppSetup);
+          const warped = layer.powerPin.aa
+            ? warpPowerPinCanvasAA(src, ppSetup, 4)
+            : warpPowerPinCanvas(src, ppSetup);
           const shift = powerPinAnchorShift(layer, ppSetup, natW, natH);
           const pw = Math.round(ppSetup.ow * Math.abs(layer.scaleX || 1));
           const ph = Math.round(ppSetup.oh * Math.abs(layer.scaleY || 1));
