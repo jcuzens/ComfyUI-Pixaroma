@@ -500,6 +500,7 @@ export class PixaromaUI {
 
       const layerItem = createLayerItem({
         name: layer.name,
+        tag: layer.isAdjustment && layer.clipToLayer ? "clipped" : undefined,
         visible: layer.visible,
         locked: layer.locked,
         active: isFirst,
@@ -589,6 +590,28 @@ export class PixaromaUI {
     const panel = createPanel("Adjustments", { collapsible: true, collapsed: false });
     const root = panel.el;
 
+    // Clip to layer: when enabled, grade only the nearest visible image
+    // layer below instead of the whole canvas (Photoshop-style clip).
+    const clipRow = document.createElement("div");
+    clipRow.className = "pxf-slider-row";
+    const clipLbl = document.createElement("label");
+    clipLbl.className = "pxf-slider-label";
+    clipLbl.textContent = "Clip to layer";
+    clipRow.appendChild(clipLbl);
+    const clipChk = document.createElement("input");
+    clipChk.type = "checkbox";
+    clipChk.addEventListener("change", () => {
+      const ly = core.getActiveLayer();
+      if (!ly || !ly.isAdjustment) return;
+      ly.clipToLayer = clipChk.checked;
+      core.draw();
+      core.pushHistory();
+      this.refreshLayersPanel();
+    });
+    clipRow.appendChild(clipChk);
+    panel.content.appendChild(clipRow);
+    this._fxClipChk = clipChk;
+
     const strip = document.createElement("div");
     strip.className = "pxf-ratio-grid pix-fx-presets";
     const presetChips = new Map();
@@ -676,6 +699,19 @@ export class PixaromaUI {
       this._fxPanel.sliders[key].setValue(v);
     }
     this.refreshPresetSelection(ly);
+    // Clip toggle: sync state; disabled when there is no visible
+    // non-adjustment layer below to clip to.
+    if (this._fxClipChk) {
+      this._fxClipChk.checked = !!ly.clipToLayer;
+      const idx = this.core.layers.indexOf(ly);
+      const hasTarget = this.core.layers
+        .slice(0, idx)
+        .some((t) => t.visible !== false && !t.isAdjustment);
+      this._fxClipChk.disabled = !hasTarget;
+      this._fxClipChk.title = hasTarget
+        ? "Grade only the layer directly below (clipped)"
+        : "No layer below to clip to";
+    }
   }
 
   // Light up the chip whose values match the layer (orange .active), clear

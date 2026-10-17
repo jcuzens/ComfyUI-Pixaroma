@@ -173,3 +173,36 @@ export function fxSeed(layerId) {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
   return Math.abs(h) % 100000;
 }
+
+// Map clipped FX adjustment layers onto the layer they grade (see
+// docs/composer-fx-math.md "Clip to layer"). layers: bottom -> top. A clipped
+// adjustment (isAdjustment + clipToLayer, visible) grades the nearest visible
+// non-adjustment layer below it, skipping invisible layers and other
+// adjustment layers; with no such layer below it has no effect. Returns
+// { byTarget: Map<targetIndex, [{index, adjustments, amount01, seed}]> (refs
+// bottom-to-top), consumed: Set<index> } - consumed adjustments are applied to
+// their target's own pixels and must be skipped by the render loop.
+// Mirrors nodes/_fx_adjust_engine.py resolve_clip_targets.
+export function resolveClipTargets(layers) {
+  const byTarget = new Map();
+  const consumed = new Set();
+  for (let j = 0; j < layers.length; j++) {
+    const a = layers[j];
+    if (!a || !a.isAdjustment || !a.clipToLayer || a.visible === false) continue;
+    consumed.add(j);
+    const amount01 = a.opacity != null ? a.opacity : 1;
+    for (let i = j - 1; i >= 0; i--) {
+      const t = layers[i];
+      if (!t || t.visible === false || t.isAdjustment) continue;
+      if (!byTarget.has(i)) byTarget.set(i, []);
+      byTarget.get(i).push({
+        index: j,
+        adjustments: a.adjustments,
+        amount01,
+        seed: fxSeed(a.id),
+      });
+      break;
+    }
+  }
+  return { byTarget, consumed };
+}

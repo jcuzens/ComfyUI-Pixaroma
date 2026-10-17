@@ -482,6 +482,12 @@ export function injectFrameworkStyles() {
   font-size: 11px; padding: 2px 6px; outline: none;
   font-family: inherit; min-width: 0;
 }
+/* Small status tag next to the layer name (e.g. "clipped") */
+.pxf-layer-tag {
+  font-size: 9px; color: var(--pxf-accent); flex-shrink: 0;
+  border: 1px solid var(--pxf-accent); border-radius: 3px;
+  padding: 0 3px; margin-left: 2px; align-self: center; user-select: none;
+}
 
 /* Action bar (add, dup, delete, up, down, merge) */
 .pxf-layers-actions {

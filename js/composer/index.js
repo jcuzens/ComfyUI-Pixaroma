@@ -4,7 +4,7 @@ import { pixApiUrl } from "../shared/api_url.mjs";
 // listener) AND inside the execution-events try block further down.
 // Importing it once here keeps both call sites using the same module.
 import { api } from "../../../scripts/api.js";
-import { applyFx, isNeutral, fxSeed } from "./fx_engine.mjs";
+import { applyFx, isNeutral, fxSeed, resolveClipTargets } from "./fx_engine.mjs";
 import {
   allow_debug,
   createNodePreview,
@@ -452,13 +452,18 @@ app.registerExtension({
         ctx.fillStyle = bgColor;
         ctx.fillRect(0, 0, docW, docH);
 
+        // Clip-to-layer (mirrors the editor _drawImpl + the Python
+        // dynamic-compose path): a clipped FX layer grades only the layer
+        // below it, via a doc-sized offscreen + the layer's real blend mode.
+        const clipFx = resolveClipTargets(loadList.map((it) => it.layer));
+
         loadList.forEach((item, i) => {
           if (item.layer.visible === false) return;
 
-          // FX adjustment layer: grade everything drawn so far (mirrors the
-          // editor _drawImpl + the Python dynamic-compose path). Keeps the node
+          // FX adjustment layer: grade everything drawn so far. Keeps the node
           // mini-preview matching the editor for placeholder workflows.
           if (item.layer.isAdjustment) {
+            if (clipFx.consumed.has(i)) return; // already graded its target layer
             const ly = item.layer;
             const amount01 = ly.opacity ?? 1;
             if (isNeutral(ly.adjustments, amount01)) return;
@@ -471,12 +476,27 @@ app.registerExtension({
           const img = images[i];
           const mask = maskImages[i] || null;
 
+          const clipRefs = (clipFx.byTarget.get(i) || []).filter(
+            (r) => !isNeutral(r.adjustments, r.amount01),
+          );
+          let fxOff = null;
+          if (clipRefs.length) {
+            fxOff = document.createElement("canvas");
+            fxOff.width = docW; fxOff.height = docH;
+          }
+          // Clip path: draw the layer source-over onto the offscreen (opacity
+          // baked in by drawLayer), grade it, composite with the real blend.
+          const target = clipRefs.length ? fxOff.getContext("2d") : ctx;
+          const layerForDraw = clipRefs.length
+            ? { ...item.layer, blendMode: "Normal" }
+            : item.layer;
+
           if (item.isPlaceholder) {
             if (img) {
               const phW = item.layer.naturalWidth || Math.round(docW / 2);
               const phH = item.layer.naturalHeight || Math.round(docH / 2);
               const fitted = applyFillMode(img, phW, phH, item.layer.fillMode || "cover");
-              drawLayer(ctx, item.layer, fitted, mask);
+              drawLayer(target, layerForDraw, fitted, mask);
             } else {
               const phW = item.layer.naturalWidth || Math.round(docW / 2);
               const phH = item.layer.naturalHeight || Math.round(docH / 2);
@@ -492,10 +512,22 @@ app.registerExtension({
               pCtx.textBaseline = "middle";
               pCtx.fillStyle = "rgba(255,255,255,0.85)";
               pCtx.fillText(item.layer.name || `image_${item.layer.inputIndex}`, phW / 2, phH / 2);
-              drawLayer(ctx, item.layer, pc);
+              drawLayer(target, layerForDraw, pc);
             }
           } else if (img) {
-            drawLayer(ctx, item.layer, img, mask);
+            drawLayer(target, layerForDraw, img, mask);
+          }
+
+          if (clipRefs.length) {
+            const id = target.getImageData(0, 0, docW, docH);
+            for (const ref of clipRefs)
+              applyFx(id.data, docW, docH, ref.adjustments, ref.amount01, ref.seed);
+            target.putImageData(id, 0, 0);
+            ctx.save();
+            if (item.layer.blendMode && BLEND_MAP[item.layer.blendMode])
+              ctx.globalCompositeOperation = BLEND_MAP[item.layer.blendMode];
+            ctx.drawImage(fxOff, 0, 0);
+            ctx.restore();
           }
         });
 
