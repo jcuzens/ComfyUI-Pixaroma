@@ -861,6 +861,7 @@ PixaromaEditor.prototype.attachEvents = function () {
             visible: layer.visible,
             opacity: layer.opacity ?? 1,
             locked: !!layer.locked,
+            clipToLayer: !!layer.clipToLayer,
           };
         }
         let finalSrcPath = layer.rawServerPath || null;

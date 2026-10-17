@@ -252,6 +252,7 @@ export class PixaromaEditor {
       visible: true,
       opacity: 1, // = Amount
       locked: false,
+      clipToLayer: false,
     };
     this.layers.push(layer);
     this.selectedLayerIds = new Set([id]);

@@ -75,6 +75,29 @@ Keep the ORIGINAL below-pixels `orig` (already 0..1). Clamp the processed result
 then `out = orig*(1-amount01) + processed_clamped*amount01`, then clamp 0..1 (safety),
 *255, round half-up. `amount01 = layer.opacity` (0..1).
 
+## Clip to layer (`clipToLayer`)
+An adjustment layer with `clipToLayer: true` grades ONLY the nearest VISIBLE
+non-adjustment layer BELOW it (skips invisible layers and other adjustment
+layers), instead of the whole canvas (background + everything below). Target
+search and per-layer application must agree across the three render sites:
+`resolveClipTargets()` (fx_engine.mjs) / `resolve_clip_targets()`
+(_fx_adjust_engine.py), applied in:
+- `js/composer/render.mjs` `_drawImpl` (editor + saved composite)
+- `js/composer/index.js` `compositeAll` (node mini-preview)
+- `nodes/node_composition.py` dynamic path (placeholder/rembg/mask workflows)
+
+Rules:
+- A clipped adjustment with no eligible target below is a NO-OP (consumed,
+  drawn nothing) - never falls back to whole-canvas grading.
+- The grade runs on the target layer's own document-sized pixels AFTER its
+  transform + blur and BEFORE its blend onto the canvas, so the layer's
+  opacity/blend/position are unchanged and pixels outside the layer are
+  untouched (alpha is preserved).
+- Multiple clipped adjustments on one target apply bottom-to-top, each a full
+  pipeline pass with its own amount/seed (seed = fxSeed(target's ref id)).
+- Unclipped adjustments keep the legacy whole-canvas behavior.
+- Neutral adjustments (isNeutral) are skipped everywhere, clipped or not.
+
 ## Presets (name -> non-zero fields; all others 0)
 15 cinematic looks (Original + 14), listed in grid order (5 across x 3 down).
 - Original:  {}

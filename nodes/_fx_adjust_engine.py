@@ -167,3 +167,41 @@ def _fx_seed(layer_id):
     for ch in str(layer_id):
         h = (h * 31 + ord(ch)) & 0x7FFFFFFF
     return h % 100000
+
+
+def resolve_clip_targets(layers):
+    """Map clipped FX adjustment layers onto the layer they grade.
+
+    layers: bottom -> top. A clipped adjustment (isAdjustment + clipToLayer,
+    visible) grades the nearest visible non-adjustment layer BELOW it,
+    skipping invisible layers and other adjustment layers; with no such layer
+    below it has no effect. Returns (by_target, consumed): by_target maps a
+    target layer index to a bottom-to-top list of {"index", "adjustments",
+    "amount01", "seed"} refs to apply to that layer's own pixels; consumed is
+    the set of clipped-adjustment indices the render loop must skip (already
+    applied to their target). Mirrors JS resolveClipTargets.
+    """
+    by_target = {}
+    consumed = set()
+    for j, a in enumerate(layers):
+        if not isinstance(a, dict):
+            continue
+        if not (a.get("isAdjustment") and a.get("clipToLayer") and a.get("visible", True)):
+            continue
+        consumed.add(j)
+        op = a.get("opacity")
+        amount01 = float(op) if op is not None else 1.0
+        for i in range(j - 1, -1, -1):
+            t = layers[i]
+            if not isinstance(t, dict):
+                continue
+            if not t.get("visible", True) or t.get("isAdjustment"):
+                continue
+            by_target.setdefault(i, []).append({
+                "index": j,
+                "adjustments": a.get("adjustments") or {},
+                "amount01": amount01,
+                "seed": _fx_seed(a.get("id") or ""),
+            })
+            break
+    return by_target, consumed

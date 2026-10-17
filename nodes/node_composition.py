@@ -10,7 +10,7 @@ from server import PromptServer
 from .node_ref import any_type, FlexibleOptionalInputType
 from ._path_guard import safe_join
 from ._resize_helpers import normalize_bit_depth
-from ._fx_adjust_engine import apply_fx, is_neutral, _fx_seed
+from ._fx_adjust_engine import apply_fx, is_neutral, _fx_seed, resolve_clip_targets
 from ._bg_removal_helpers import (
     is_birefnet_model_id,
     run_birefnet_on_pil,
@@ -672,7 +672,10 @@ class PixaromaImageComposition:
                 bg_hex = meta.get("bg_color") or "#1e1e1e"
                 bg_rgba = _hex_to_rgba(bg_hex)
                 canvas = Image.new("RGBA", (doc_w, doc_h), bg_rgba)
-                for layer in layers:
+                # Clip-to-layer: which layers own which clipped FX adjustments
+                # (mirrors the JS render path; see resolve_clip_targets).
+                clip_by_target, clip_consumed = resolve_clip_targets(layers)
+                for li, layer in enumerate(layers):
                     if not layer.get("visible", True):
                         continue
                     # FX adjustment layer: grade everything composited so far
@@ -681,6 +684,10 @@ class PixaromaImageComposition:
                     # re-applies it on the dynamic path (placeholder/rembg/mask)
                     # where live pixels differ from the baked composite.
                     if layer.get("isAdjustment"):
+                        # Clipped adjustments already graded their target
+                        # layer's own pixels — skip here.
+                        if li in clip_consumed:
+                            continue
                         amount01 = float(layer.get("opacity", 1) or 0)
                         adj = layer.get("adjustments") or {}
                         if is_neutral(adj, amount01):
@@ -779,6 +786,19 @@ class PixaromaImageComposition:
                         if blur_slider and blur_slider > 0:
                             blur_radius = (blur_slider / 100.0) ** 2 * 50.0
                             composed = composed.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+                        # Clipped FX adjustments grade this layer's own pixels
+                        # (post transform + blur, pre blend), bottom-to-top.
+                        # Alpha is preserved; the blend below is unchanged.
+                        for ref in clip_by_target.get(li, ()):
+                            if is_neutral(ref["adjustments"], ref["amount01"]):
+                                continue
+                            rgb = np.asarray(composed.convert("RGB"), dtype=np.float32) / 255.0
+                            graded = apply_fx(rgb, ref["adjustments"], ref["amount01"], ref["seed"])
+                            graded_img = Image.fromarray(
+                                (graded * 255.0).round().astype(np.uint8), "RGB"
+                            ).convert("RGBA")
+                            graded_img.putalpha(composed.getchannel("A"))
+                            composed = graded_img
                         canvas = _blend_over(canvas, composed, layer.get("blendMode", "Normal"))
                     except Exception as _le:
                         print(f"[Pixaroma] Composer: skipped a layer that failed to render: {_le}")

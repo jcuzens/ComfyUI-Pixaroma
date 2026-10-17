@@ -183,7 +183,16 @@ export function createLayerItem(config) {
     config.onLockToggle();
   });
 
-  el.append(vis, thumbWrap, nameEl);
+  // Optional small status tag rendered after the name (e.g. "clipped").
+  // Kept out of the name text so inline rename round-trips cleanly.
+  if (config.tag) {
+    const tagEl = document.createElement("span");
+    tagEl.className = "pxf-layer-tag";
+    tagEl.textContent = config.tag;
+    el.append(vis, thumbWrap, nameEl, tagEl);
+  } else {
+    el.append(vis, thumbWrap, nameEl);
+  }
   if (editBtn) el.appendChild(editBtn);
   el.appendChild(lock);
 

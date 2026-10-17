@@ -1,7 +1,7 @@
 // Rendering, history/undo, restore — mixed into PixaromaEditor.prototype
 import { PixaromaEditor } from "./core.mjs";
 import { pixApiUrl } from "../shared/api_url.mjs";
-import { applyFx, isNeutral, fxSeed } from "./fx_engine.mjs";
+import { applyFx, isNeutral, fxSeed, resolveClipTargets } from "./fx_engine.mjs";
 import {
   powerPinSetup,
   pinnedPointsToDoc,
@@ -216,13 +216,21 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
     oc.clearRect(0, 0, this.selCanvas.width, this.selCanvas.height);
   }
 
-  this.layers.forEach((layer) => {
+  // Clip-to-layer: a clipped FX adjustment grades only the nearest visible
+  // non-adjustment layer below it. Precompute once; the loop applies the refs
+  // to the target layer's own doc-sized pixels (offscreen, source-over) and
+  // composites the result with the layer's own blend mode. Unclipped
+  // adjustments keep the whole-canvas grade below. Mirrors
+  // node_composition.py + index.js compositeAll.
+  const clipFx = resolveClipTargets(this.layers);
+  this.layers.forEach((layer, li) => {
     if (!layer.visible) return;
     // FX adjustment layer: grade everything composited so far (the pixels
     // already on the canvas = every layer below this one), then move on. Runs
     // for BOTH interactive and clean/save renders so the grade is baked into
     // the saved composite PNG (which keeps the Python fast path correct).
     if (layer.isAdjustment) {
+      if (clipFx.consumed.has(li)) return; // already graded its target layer
       const amount01 = layer.opacity ?? 1;
       if (isNeutral(layer.adjustments, amount01)) return;
       const W = this.canvas.width, H = this.canvas.height;
@@ -247,11 +255,35 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       return;
 
     const isSelected = this.selectedLayerIds.has(layer.id);
-    this.ctx.save();
-    this.ctx.globalAlpha = layer.opacity;
-    // Blend mode support (maps to canvas globalCompositeOperation)
-    if (layer.blendMode && BLEND_MAP[layer.blendMode])
-      this.ctx.globalCompositeOperation = BLEND_MAP[layer.blendMode];
+    // Clip-to-layer target: draw the layer's pixels onto a doc-sized offscreen
+    // (source-over, opacity baked in), grade them with its clipped
+    // adjustments, then composite with the layer's own blend mode + opacity.
+    const clipRefs = (clipFx.byTarget.get(li) || []).filter(
+      (r) => !isNeutral(r.adjustments, r.amount01),
+    );
+    if (clipRefs.length) {
+      if (
+        !this._fxClipCanvas ||
+        this._fxClipCanvas.width !== this.canvas.width ||
+        this._fxClipCanvas.height !== this.canvas.height
+      ) {
+        this._fxClipCanvas = document.createElement("canvas");
+        this._fxClipCanvas.width = this.canvas.width;
+        this._fxClipCanvas.height = this.canvas.height;
+        this._fxClipCtx = this._fxClipCanvas.getContext("2d", {
+          willReadFrequently: true,
+        });
+      }
+      this._fxClipCtx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+    const layerCtx = clipRefs.length ? this._fxClipCtx : this.ctx;
+    layerCtx.save();
+    layerCtx.globalAlpha = layer.opacity;
+    // Blend mode support (maps to canvas globalCompositeOperation). The clip
+    // path keeps source-over here — the real blend mode is applied by the
+    // final drawImage of the graded offscreen onto the main canvas.
+    if (!clipRefs.length && layer.blendMode && BLEND_MAP[layer.blendMode])
+      layerCtx.globalCompositeOperation = BLEND_MAP[layer.blendMode];
 
     // CC Power Pin: the placement frame is the pin-quad AABB, re-anchored at
     // C' so the layer never jumps on enable/drag. Degenerate pin -> normal
@@ -273,14 +305,14 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       ? powerPinAnchorShift(layer, ppSetup, Wimg, Him)
       : null;
 
-    this.ctx.translate(
+    layerCtx.translate(
       layer.cx + (ppShift ? ppShift.x : 0),
       layer.cy + (ppShift ? ppShift.y : 0),
     );
-    this.ctx.rotate((layer.rotation * Math.PI) / 180);
+    layerCtx.rotate((layer.rotation * Math.PI) / 180);
 
-    this.ctx.save();
-    this.ctx.scale(layer.flippedX ? -1 : 1, layer.flippedY ? -1 : 1);
+    layerCtx.save();
+    layerCtx.scale(layer.flippedX ? -1 : 1, layer.flippedY ? -1 : 1);
 
     // Per-layer Gaussian blur — non-destructive, applied to the final composited
     // (post-mask) result. Selection box stroke is on the overlay canvas (oc),
@@ -290,7 +322,7 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
     // blur amounts. Mirror in js/composer/index.js + nodes/node_composition.py.
     if (layer.blur && layer.blur > 0) {
       const r = Math.pow(layer.blur / 100, 2) * 50;
-      this.ctx.filter = "blur(" + r + "px)";
+      layerCtx.filter = "blur(" + r + "px)";
     }
 
     if (ppSetup) {
@@ -311,7 +343,7 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       const outScale = dragging
         ? Math.min(1, 512 / Math.max(ppSetup.ow, ppSetup.oh))
         : 1;
-      this.ctx.drawImage(
+      layerCtx.drawImage(
         warpPowerPinCanvas(srcForWarp, ppSetup, outScale),
         -w / 2,
         -h / 2,
@@ -334,14 +366,30 @@ PixaromaEditor.prototype._drawImpl = function (cleanRender) {
       this.renderCtx.drawImage(layer.eraserMaskCanvas_internal, 0, 0);
       this.renderCtx.globalCompositeOperation = "source-over";
 
-      this.ctx.drawImage(this.renderCanvas, -w / 2, -h / 2, w, h);
+      layerCtx.drawImage(this.renderCanvas, -w / 2, -h / 2, w, h);
     } else {
-      this.ctx.drawImage(layer.img, -w / 2, -h / 2, w, h);
+      layerCtx.drawImage(layer.img, -w / 2, -h / 2, w, h);
     }
 
-    this.ctx.filter = "none";
-    this.ctx.restore();
-    this.ctx.restore();
+    layerCtx.filter = "none";
+    layerCtx.restore();
+    layerCtx.restore();
+
+    // Clip-to-layer: grade the layer's own pixels, then composite them onto
+    // the main canvas with the layer's real blend mode (opacity is already
+    // baked into the offscreen by the source-over draw above).
+    if (clipRefs.length) {
+      const Wc = this.canvas.width, Hc = this.canvas.height;
+      const cid = this._fxClipCtx.getImageData(0, 0, Wc, Hc);
+      for (const ref of clipRefs)
+        applyFx(cid.data, Wc, Hc, ref.adjustments, ref.amount01, ref.seed);
+      this._fxClipCtx.putImageData(cid, 0, 0);
+      this.ctx.save();
+      if (layer.blendMode && BLEND_MAP[layer.blendMode])
+        this.ctx.globalCompositeOperation = BLEND_MAP[layer.blendMode];
+      this.ctx.drawImage(this._fxClipCanvas, 0, 0);
+      this.ctx.restore();
+    }
 
     // Draw selection border & handles on overlay canvas (not clipped by main canvas)
     if (!cleanRender && isSelected && oc) {
@@ -538,6 +586,7 @@ PixaromaEditor.prototype.attemptRestore = async function () {
           visible: mLayer.visible !== false,
           opacity: mLayer.opacity ?? 1,
           locked: !!mLayer.locked,
+          clipToLayer: !!mLayer.clipToLayer,
         };
         loadedCount++;
         if (loadedCount === layersToLoad.length) this.finishRestore();
