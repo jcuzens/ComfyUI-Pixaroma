@@ -414,6 +414,7 @@ const HELP = {
           "Drag an image onto the node body to add a layer and open the editor, or click `Open Image Composer`.",
           "Add more layers via drag-drop, paste, the `+` button, or by wiring an upstream IMAGE into a placeholder slot.",
           "Select a layer in the panel to move / scale / rotate it with handles, or use the right sidebar to set opacity, blend mode, and blur.",
+          "Placeholder slots show their coloured block in the editor. After a run, tick `Show last input` (or click `Update Preview`) to display the image the slot actually received, so you can tweak position, scale and pins against the real content.",
           "Add an FX layer to apply a color grade or cinematic preset above any layer group.",
           "Click `Save` when done; run the workflow to composite and output the result.",
         ],

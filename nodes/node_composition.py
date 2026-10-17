@@ -50,6 +50,33 @@ def _save_preview_png(pil_img, doc_w, doc_h):
         return None
 
 
+def _save_slot_preview(tensor, input_index):
+    """Save the RAW placeholder slot input — the exact tensor the upstream
+    node passed in, pre rembg/crop/fit — into the temp preview folder. The
+    editor's "show last input" feature reads it back via /view after a run,
+    so a placeholder can be tweaked against the image that actually arrived
+    even when the upstream is a node with no client-side preview (KSampler
+    etc.). Returns the UI image descriptor dict (same shape as
+    _save_preview_png) or None when the tensor is missing or the save failed
+    (the layer still composites normally either way)."""
+    if tensor is None:
+        return None
+    try:
+        img = _tensor_to_pil(tensor)
+        temp_dir = os.path.join(folder_paths.get_temp_directory(), _PIXAROMA_PREVIEW_SUBFOLDER)
+        os.makedirs(temp_dir, exist_ok=True)
+        filename = f"composer_slot{int(input_index) or 1}_{int(time.time() * 1000)}.png"
+        img.save(os.path.join(temp_dir, filename), format="PNG", optimize=False)
+        return {
+            "filename": filename,
+            "subfolder": _PIXAROMA_PREVIEW_SUBFOLDER,
+            "type": "temp",
+        }
+    except Exception as e:
+        print(f"[Pixaroma] slot preview save failed: {e}")
+        return None
+
+
 # ── Helpers for placeholder compositing ──────────────────────────────────────
 
 def _hex_to_rgba(hex_str):
@@ -806,6 +833,9 @@ class PixaromaImageComposition:
                 # Clip-to-layer: which layers own which clipped FX adjustments
                 # (mirrors the JS render path; see resolve_clip_targets).
                 clip_by_target, clip_consumed = resolve_clip_targets(layers)
+                # Raw per-slot inputs saved for the editor's "show last input"
+                # feature, keyed by string inputIndex (JSON object keys).
+                slot_previews = {}
                 for li, layer in enumerate(layers):
                     if not layer.get("visible", True):
                         continue
@@ -837,6 +867,9 @@ class PixaromaImageComposition:
                         ph_h = layer.get("naturalHeight", 512)
                         img_input = kwargs.get(f"image_{layer.get('inputIndex', 1)}")
                         if img_input is not None:
+                            slot_desc = _save_slot_preview(img_input, layer.get("inputIndex", 1))
+                            if slot_desc:
+                                slot_previews[str(layer.get("inputIndex", 1))] = slot_desc
                             layer_img = _tensor_to_pil(img_input)
                             if layer.get("removeBgOnExec"):
                                 layer_img = _remove_background(layer_img, layer.get("bgRemovalQuality", "normal"))
@@ -983,17 +1016,21 @@ class PixaromaImageComposition:
                 # index.js listener picks up and applies to the top
                 # preview only.
                 preview_img = _save_preview_png(canvas, doc_w, doc_h)
-                if preview_img:
+                # Send the event when the composite preview OR any slot input
+                # was saved - the editor consumes the slot map even when the
+                # composite save failed (filename null then).
+                if preview_img or slot_previews:
                     try:
                         PromptServer.instance.send_sync(
                             "pixaroma-composer-preview",
                             {
                                 "project_id": meta.get("project_id"),
-                                "filename": preview_img["filename"],
-                                "subfolder": preview_img["subfolder"],
-                                "type": preview_img["type"],
+                                "filename": preview_img["filename"] if preview_img else None,
+                                "subfolder": preview_img["subfolder"] if preview_img else "",
+                                "type": preview_img["type"] if preview_img else "",
                                 "doc_w": doc_w,
                                 "doc_h": doc_h,
+                                "slots": slot_previews,
                             },
                         )
                     except Exception as e:

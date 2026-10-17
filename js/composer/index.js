@@ -615,7 +615,7 @@ app.registerExtension({
       // nodes, inside subgraphs too, always pass (js/shared/live_node.mjs).
       if (!isLiveNode(node)) return;
       const data = event?.detail;
-      if (!data || !data.filename) return;
+      if (!data || (!data.filename && !data.slots)) return;
       // Match the event to this node. If project_id is missing (shouldn't
       // happen but defensive), fall back to accepting the event so a
       // single-node workflow still works.
@@ -624,6 +624,11 @@ app.registerExtension({
         myProjectId = JSON.parse(projectJson)?.project_id || null;
       } catch {}
       if (data.project_id && myProjectId && data.project_id !== myProjectId) return;
+      // Per-slot raw inputs from this run (temp dir, read via /view). The
+      // editor's "show last input" feature consumes these. An empty map
+      // clears stale previews from an earlier run.
+      node._pixaromaSlotPreviews = data.slots || null;
+      if (!data.filename) return;
       if (isEditorOpen(node)) return; // don't fight the editor's own saves
       node._pixaromaShowPreviewFromUI({
         filename: data.filename,
@@ -726,6 +731,9 @@ app.registerExtension({
         // dynamic re-compose path (no placeholders / auto-rembg /
         // masks), onExecuted falls back to rebuildPreview correctly.
         node._pixaromaWsPreviewApplied = false;
+        // The previous run's per-slot inputs are stale the moment a new
+        // run starts (this run re-saves them, or the slots lose their links).
+        node._pixaromaSlotPreviews = null;
       };
       api.addEventListener("execution_start", _onExecStart);
 

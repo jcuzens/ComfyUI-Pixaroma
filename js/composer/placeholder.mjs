@@ -171,7 +171,43 @@ PixaromaEditor.prototype._getUpstreamImageUrl = function (layer) {
     if (img && img.src) return img.src;
   }
 
+  // Last resort: the raw input the composer node consumed on the last run.
+  // Python saves each connected slot's tensor to the temp dir and reports it
+  // on the pixaroma-composer-preview WS event (node._pixaromaSlotPreviews).
+  // Non-output upstreams (KSampler, processing nodes) never have a
+  // client-side image, so without this a placeholder is stuck on its flat
+  // colour block after a run and can't be tweaked against real content.
+  const slot = this.node?._pixaromaSlotPreviews?.[String(layer.inputIndex)];
+  if (slot?.filename) {
+    const p = new URLSearchParams({
+      filename: slot.filename,
+      type: slot.type || "temp",
+      subfolder: slot.subfolder || "",
+      t: Date.now(),
+    });
+    return pixApiUrl(`/view?${p.toString()}`);
+  }
+
   return null;
+};
+
+// Swap a placeholder back to its flat colour block (inverse of the preview
+// path). The block is regenerated at the layer's CURRENT natural size: the
+// preview's upscale compensation already lives in scaleX/scaleY, so the
+// on-canvas rectangle and the saved transforms are unchanged by the swap.
+PixaromaEditor.prototype.restorePlaceholderBlock = function (layerId) {
+  const layer = this.layers.find((l) => l.id === layerId);
+  if (!layer || !layer.isPlaceholder) return;
+  const w = layer.img ? layer.img.width : Math.round(this.docWidth / 2);
+  const h = layer.img ? layer.img.height : Math.round(this.docHeight / 2);
+  layer._showInput = false;
+  layer.img = this._makePlaceholderImage(w, h, layer.placeholderColor, layer.name, (bitmapImg) => {
+    layer.img = bitmapImg;
+    this.draw();
+  });
+  this.ui.updateActiveLayerUI();
+  this.draw();
+  this.pushHistory();
 };
 
 PixaromaEditor.prototype._applyFillMode = function (srcImg, phW, phH, mode, callback) {
@@ -249,6 +285,7 @@ PixaromaEditor.prototype.previewPlaceholderInput = function (layerId) {
     // The fitted image may have grown (quality-fix upscale): keep the pins
     // pointing at the same content. Same-size -> no-op.
     rescalePowerPin(layer, origPhW, origPhH);
+    layer._showInput = true;
     this.ui.updateActiveLayerUI();
     this.draw();
     this.pushHistory();
@@ -299,6 +336,21 @@ export function getUpstreamImageUrlForNode(node, inputName) {
     if (img && img.src) return img.src;
   }
 
+  // Same last resort as the editor path: the last run's saved slot input.
+  const idx = parseInt(String(inputName).slice(6), 10);
+  if (!isNaN(idx)) {
+    const slot = node?._pixaromaSlotPreviews?.[String(idx)];
+    if (slot?.filename) {
+      const p = new URLSearchParams({
+        filename: slot.filename,
+        type: slot.type || "temp",
+        subfolder: slot.subfolder || "",
+        t: Date.now(),
+      });
+      return pixApiUrl(`/view?${p.toString()}`);
+    }
+  }
+
   return null;
 }
 
@@ -324,6 +376,7 @@ PixaromaEditor.prototype.changePlaceholderRatio = function (layer, ratioKey) {
 
   const oldW = layer.img ? layer.img.width : w;
   const oldH = layer.img ? layer.img.height : h;
+  layer._showInput = false;
   layer.img = this._makePlaceholderImage(w, h, layer.placeholderColor, layer.name, (bitmapImg) => {
     layer.img = bitmapImg;
     this.draw();

@@ -13,6 +13,7 @@ import {
   createTransformPanel,
   createSelectInput,
   createRow,
+  createCheckbox,
   createTextEditorPanel,
 } from "../framework/index.mjs";
 // PixaromaAPI is used below to query rembg install status when the
@@ -397,11 +398,23 @@ export class PixaromaUI {
           if (core._phRatioRow) core._phRatioRow.style.display = "";
           if (core._phRatioSelect)
             core._phRatioSelect.value = layer.phRatio || "canvas";
-          const connected = core.isPlaceholderConnected(layer);
+          // An image is actually showable when the slot is wired AND the
+          // client can resolve one (LoadImage widget, upstream node preview,
+          // or the last run's saved slot input).
+          const canShowInput =
+            core.isPlaceholderConnected(layer) &&
+            !!core._getUpstreamImageUrl?.(layer);
           if (core._phPreviewBtn) {
             core._phPreviewBtn.style.display = "";
-            core._phPreviewBtn.disabled = !connected;
-            core._phPreviewBtn.style.opacity = connected ? "1" : "0.3";
+            core._phPreviewBtn.disabled = !canShowInput;
+            core._phPreviewBtn.style.opacity = canShowInput ? "1" : "0.3";
+          }
+          if (core._phShowInputRow) core._phShowInputRow.style.display = "";
+          if (core._phShowInputCb) {
+            core._phShowInputCb.checked = !!layer._showInput;
+            // Checkable when an image is showable; uncheckable anytime (the
+            // block can always be regenerated).
+            core._phShowInputCb.disabled = !layer._showInput && !canShowInput;
           }
           if (core._convertPhBtn) {
             core._convertPhBtn.style.opacity = "0.3";
@@ -416,6 +429,7 @@ export class PixaromaUI {
         } else {
           if (core._phFillRow) core._phFillRow.style.display = "none";
           if (core._phRatioRow) core._phRatioRow.style.display = "none";
+          if (core._phShowInputRow) core._phShowInputRow.style.display = "none";
           if (core._phPreviewBtn) core._phPreviewBtn.style.display = "none";
           if (core._convertPhBtn) {
             core._convertPhBtn.style.opacity = "1";
@@ -1241,6 +1255,28 @@ export class PixaromaUI {
     core._phFillRow = fillRow;
     core._phFillSelect = fillSelect;
     phPanel.content.appendChild(fillRow);
+
+    // "Show last input": swap the flat colour block for the raw image the
+    // slot received on the last run (and back). Session-only — the saved
+    // project always keeps the slot's block/natural size, and execution
+    // always composites whatever is wired in.
+    const showInputChk = createCheckbox("Show last input", false, (val) => {
+      const firstId = Array.from(core.selectedLayerIds)[0];
+      const layer = core.layers.find((l) => l.id === firstId);
+      if (!layer || !layer.isPlaceholder) return;
+      if (val) {
+        core.previewPlaceholderInput(layer.id);
+      } else {
+        core.restorePlaceholderBlock(layer.id);
+      }
+    });
+    showInputChk.el.style.marginTop = "4px";
+    showInputChk.el.style.display = "none";
+    showInputChk.el.title =
+      "Show the image this slot received on the last run, or the coloured slot block";
+    core._phShowInputRow = showInputChk.el;
+    core._phShowInputCb = showInputChk.checkbox;
+    phPanel.content.appendChild(showInputChk.el);
 
     // Load Now button
     const previewBtn = createButton("Update Preview", { variant: "full" });
