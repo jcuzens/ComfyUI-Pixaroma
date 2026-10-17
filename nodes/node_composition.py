@@ -554,7 +554,11 @@ def _apply_layer_transform(img, layer, doc_w, doc_h):
     paste_y = int(cy - img.height / 2)
 
     canvas = Image.new("RGBA", (doc_w, doc_h), (0, 0, 0, 0))
-    canvas.paste(img, (paste_x, paste_y), img)
+    # alpha_composite, not paste(img, pos, img): paste with the layer's own
+    # alpha as mask squares the alpha on the transparent canvas (a * a/255),
+    # which sharpened every soft edge (eraser, rembg, feather) and diverged
+    # from the JS drawImage composite. "over" keeps the layer's alpha exact.
+    canvas.alpha_composite(img, (paste_x, paste_y))
     return canvas
 def _power_pin_center(layer, W, H, ox, oy, ow, oh):
     """Doc-space placement center for a warped layer (spec 3.8): C' = C + A(d),
