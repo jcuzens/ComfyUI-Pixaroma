@@ -185,6 +185,17 @@ def _fit_to_placeholder(img, ph_w, ph_h, mode="cover"):
         return resized.crop((left, top, left + ph_w, top + ph_h))
 
 
+def _apply_placeholder_crop(img, crop):
+    """Crop a placeholder's wired input to cropRect (source-image pixels).
+    Mirrors the editor canvas drawImage: 1:1 placement, out-of-bounds source
+    stays transparent, so the post-crop image keeps its saved pixel space."""
+    x = int(crop.get("x", 0) or 0)
+    y = int(crop.get("y", 0) or 0)
+    w = max(1, int(crop.get("w", 0) or 0))
+    h = max(1, int(crop.get("h", 0) or 0))
+    return img.crop((x, y, x + w, y + h))
+
+
 def _apply_eraser_mask(img, mask_path, input_dir):
     """Apply eraser mask to image alpha. Mask white pixels = erased."""
     mask_img = _load_server_image(mask_path, input_dir)
@@ -829,6 +840,14 @@ class PixaromaImageComposition:
                             layer_img = _tensor_to_pil(img_input)
                             if layer.get("removeBgOnExec"):
                                 layer_img = _remove_background(layer_img, layer.get("bgRemovalQuality", "normal"))
+                            # The placeholder's cropRect (source-image pixels)
+                            # crops the wired input BEFORE the upscale/fit math:
+                            # the post-crop image is the saved natural size, so
+                            # upscale stays 1 and the saved pins (post-crop pixel
+                            # space) apply without rescale. Mirrors the editor
+                            # preview + mini-preview, which crop first too.
+                            if layer.get("cropRect"):
+                                layer_img = _apply_placeholder_crop(layer_img, layer["cropRect"])
                             # Quality fix: scale the slot up to source resolution
                             # if the upstream image is larger. Adjust scaleX/Y in
                             # a layer copy so the visual size matches the editor.
@@ -836,15 +855,32 @@ class PixaromaImageComposition:
                             sw, sh = layer_img.size
                             upscale = max(1.0, sw / ph_w, sh / ph_h)
                             if upscale > 1.0:
+                                old_ph_w, old_ph_h = ph_w, ph_h
                                 new_ph_w = int(round(ph_w * upscale))
                                 new_ph_h = int(round(ph_h * upscale))
-                                compensation = ph_w / new_ph_w
+                                compensation = old_ph_w / new_ph_w
                                 ph_w, ph_h = new_ph_w, new_ph_h
                                 layer = {
                                     **layer,
                                     "scaleX": layer.get("scaleX", 1.0) * compensation,
                                     "scaleY": layer.get("scaleY", 1.0) * compensation,
                                 }
+                                # The slot grew to source resolution: rescale the
+                                # pins into the new space so they keep pointing at
+                                # the same content (mirrors rescalePowerPin in the
+                                # editor preview - stale-space pins warp only a
+                                # corner of the larger image).
+                                pp = layer.get("powerPin")
+                                if pp and pp.get("pins"):
+                                    sx = ph_w / old_ph_w
+                                    sy = ph_h / old_ph_h
+                                    layer = {
+                                        **layer,
+                                        "powerPin": {
+                                            **pp,
+                                            "pins": [[px * sx, py * sy] for px, py in pp["pins"]],
+                                        },
+                                    }
                             layer_img = _fit_to_placeholder(layer_img, ph_w, ph_h, layer.get("fillMode", "cover"))
                         else:
                             color = _hex_to_rgba(layer.get("placeholderColor", "#808080"))
@@ -864,8 +900,12 @@ class PixaromaImageComposition:
                     # AFTER the crop. (Crop-only layers without a placeholder/mask
                     # take the fast path and never reach here - their crop is
                     # already baked into the saved composite PNG.)
+                    # Placeholders are skipped: their crop was applied to the wired
+                    # input above (before upscale/fit), and the no-input color
+                    # block is already natural-sized - cropping it with
+                    # source-pixel offsets would corrupt it.
                     crop = layer.get("cropRect")
-                    if crop and layer_img is not None:
+                    if crop and layer_img is not None and not layer.get("isPlaceholder"):
                         try:
                             cx0 = max(0, int(crop["x"]))
                             cy0 = max(0, int(crop["y"]))

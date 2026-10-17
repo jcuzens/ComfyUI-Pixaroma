@@ -211,10 +211,23 @@ PixaromaEditor.prototype.previewPlaceholderInput = function (layerId) {
   const img = new Image();
   img.crossOrigin = "Anonymous";
   img.onload = () => {
+    // The placeholder's cropRect (source-image pixels) crops the wired input
+    // BEFORE the upscale/fit math (mirrors node_composition.py): the post-crop
+    // image is the saved natural size, so upscale stays 1 and the saved pins
+    // (post-crop pixel space) apply without rescale.
+    let phImg = img;
+    const cr = layer.cropRect;
+    if (cr && cr.w > 0 && cr.h > 0) {
+      const cc = document.createElement("canvas");
+      cc.width = Math.max(1, Math.round(cr.w));
+      cc.height = Math.max(1, Math.round(cr.h));
+      cc.getContext("2d").drawImage(img, cr.x, cr.y, cr.w, cr.h, 0, 0, cc.width, cc.height);
+      phImg = cc;
+    }
     const origPhW = layer.img.width;
     const origPhH = layer.img.height;
-    const sw = img.naturalWidth || img.width;
-    const sh = img.naturalHeight || img.height;
+    const sw = phImg.naturalWidth || phImg.width;
+    const sh = phImg.naturalHeight || phImg.height;
     // Quality fix: if the upstream source is larger than the placeholder slot
     // in either dimension, scale the OUTPUT canvas up to match — preserves
     // source resolution instead of permanently downsampling to slot size.
@@ -229,8 +242,8 @@ PixaromaEditor.prototype.previewPlaceholderInput = function (layerId) {
       layer.scaleX = (layer.scaleX || 1) * compensation;
       layer.scaleY = (layer.scaleY || 1) * compensation;
     }
-    layer._previewImg = img;
-    layer.img = this._applyFillMode(img, phW, phH, layer.fillMode || "cover", (bitmapImg) => {
+    layer._previewImg = phImg;
+    layer.img = this._applyFillMode(phImg, phW, phH, layer.fillMode || "cover", (bitmapImg) => {
       layer.img = bitmapImg;
     });
     // The fitted image may have grown (quality-fix upscale): keep the pins

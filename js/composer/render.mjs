@@ -826,8 +826,13 @@ PixaromaEditor.prototype.finishRestore = function (hadError = false) {
   // Re-bake crops BEFORE loading masks, so the mask canvas (loaded next, sized
   // to layer.img) matches the cropped image. recenter=false: cx/cy already hold
   // the saved cropped center, so we must not shift them again.
+  // Placeholders are skipped: their layer.img is the natural-sized (post-crop)
+  // color block, and their cropRect applies to the WIRED INPUT (Python applies
+  // it at exec time, the preview applies it on connect). Baking the
+  // source-pixel crop onto the block would draw a small corner of it into a
+  // mostly-transparent canvas (blue square top-left, not filling the pins).
   this.layers.forEach((l) => {
-    if (l && l.cropRect && l.img) {
+    if (l && l.cropRect && l.img && !l.isPlaceholder) {
       l.sourceImg = l.img;
       this.applyCropToLayer(l, false);
     }

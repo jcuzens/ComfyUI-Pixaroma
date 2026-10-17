@@ -495,7 +495,21 @@ app.registerExtension({
             if (img) {
               const phW = item.layer.naturalWidth || Math.round(docW / 2);
               const phH = item.layer.naturalHeight || Math.round(docH / 2);
-              const fitted = applyFillMode(img, phW, phH, item.layer.fillMode || "cover");
+              // The placeholder's cropRect (source-image pixels) crops the
+              // wired input BEFORE the fit (matches the editor preview +
+              // Python): the post-crop image is the natural size, so the
+              // saved pins (post-crop space) stay put. The no-input color
+              // block below is already natural-sized and is never cropped.
+              let phSrc = img;
+              const phCr = item.layer.cropRect;
+              if (phCr && phCr.w > 0 && phCr.h > 0) {
+                const cc = document.createElement("canvas");
+                cc.width = Math.max(1, Math.round(phCr.w));
+                cc.height = Math.max(1, Math.round(phCr.h));
+                cc.getContext("2d").drawImage(img, phCr.x, phCr.y, phCr.w, phCr.h, 0, 0, cc.width, cc.height);
+                phSrc = cc;
+              }
+              const fitted = applyFillMode(phSrc, phW, phH, item.layer.fillMode || "cover");
               drawLayer(target, layerForDraw, fitted, mask);
             } else {
               const phW = item.layer.naturalWidth || Math.round(docW / 2);
