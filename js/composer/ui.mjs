@@ -21,6 +21,8 @@ import {
 import { PixaromaAPI } from "./api.mjs";
 import { fetchBgRemovalInfo, buildBgRemovalDropdown } from "../framework/bg_removal_dropdown.mjs";
 import { pixAsset } from "../shared/api_url.mjs";
+import { downloadTextFile } from "../shared/index.mjs";
+import { buildLayerExport, parseLayerExport, applyLayerExport } from "./scene_io.mjs";
 import { PRESETS, NEUTRAL } from "./fx_engine.mjs";
 
 // Legacy values that predate the multi-model dropdown — remapped to
@@ -131,6 +133,14 @@ export class PixaromaUI {
     // FX has no geometry → hide Transform. Text HAS geometry → keep Transform
     // (it shows alongside the Text panel; only image-only tools are hidden).
     if (core.toolsPanel) core.toolsPanel.style.display = _isFx ? "none" : "";
+
+    // Export Layer: needs exactly one non-FX layer selected (getActiveLayer is
+    // null for multi/none; the exporter itself refuses FX layers).
+    if (core._exportLayerBtn) {
+      const _exportOk = !!_activeLayer && !_isFx;
+      core._exportLayerBtn.style.opacity = _exportOk ? "1" : "0.3";
+      core._exportLayerBtn.style.pointerEvents = _exportOk ? "auto" : "none";
+    }
 
     // Context-aware tooltips based on current state
     if (core._layout && core.activeMode !== "eraser") {
@@ -1029,6 +1039,58 @@ export class PixaromaUI {
     addTextBtn.style.marginTop = "4px";
     addTextBtn.onclick = () => core.addTextLayer();
     imagesPanel.content.appendChild(addTextBtn);
+
+    // Layer export/import: one layer + its clipped FX as a standalone JSON —
+    // re-importable here, readable elsewhere (corners/pins/effects for tools
+    // like Fusion). Dimmed until exactly one non-FX layer is selected
+    // (updateActiveLayerUI toggles _exportLayerBtn).
+    const exportLayerBtn = createButton("Export Layer", { variant: "full" });
+    exportLayerBtn.title =
+      "Export the selected layer + its clipped FX as JSON (transform, pins, corners, effects)";
+    exportLayerBtn.style.marginTop = "4px";
+    exportLayerBtn.style.opacity = "0.3";
+    exportLayerBtn.style.pointerEvents = "none";
+    exportLayerBtn.onclick = () => {
+      const al = core.getActiveLayer();
+      if (!al || al.isAdjustment) return;
+      const data = buildLayerExport({
+        docWidth: core.docWidth,
+        docHeight: core.docHeight,
+        bgColor: core._bgColor || "#1e1e1e",
+        layers: core.layers,
+        layerId: al.id,
+      });
+      const safeName = (al.name || "layer").replace(/[^\w.-]+/g, "_");
+      downloadTextFile(`pixaroma_layer_${safeName}.json`, JSON.stringify(data, null, 2));
+      if (core._layout) core._layout.setStatus(`Exported ${al.name}`);
+    };
+    core._exportLayerBtn = exportLayerBtn;
+    imagesPanel.content.appendChild(exportLayerBtn);
+
+    const importLayerBtn = createButton("Import Layer", { variant: "full" });
+    importLayerBtn.title =
+      "Import a Pixaroma layer JSON (layer + its clipped FX) onto this canvas";
+    importLayerBtn.style.marginTop = "4px";
+    const importFileInput = document.createElement("input");
+    importFileInput.type = "file";
+    importFileInput.accept = ".json,application/json";
+    importFileInput.style.display = "none";
+    importFileInput.addEventListener("change", async () => {
+      const file = importFileInput.files?.[0];
+      importFileInput.value = "";
+      if (!file) return;
+      try {
+        const data = parseLayerExport(await file.text());
+        await applyLayerExport(core, data);
+      } catch (err) {
+        console.error("[PixaromaComposer] layer import failed:", err);
+        if (core._layout)
+          core._layout.setStatus(`Import failed - ${err.message}`, "warn");
+      }
+    });
+    imagesPanel.content.appendChild(importFileInput);
+    importLayerBtn.onclick = () => importFileInput.click();
+    imagesPanel.content.appendChild(importLayerBtn);
 
     layout.leftSidebar.appendChild(imagesPanel.el);
 

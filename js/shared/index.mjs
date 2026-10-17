@@ -25,6 +25,7 @@ export {
   getLogo,
   createPlaceholder,
   downloadDataURL,
+  downloadTextFile,
 } from "./utils.mjs";
 
 export {
